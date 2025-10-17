@@ -1,97 +1,105 @@
-#ifndef _TCP_STREAM_H_
-#define _TCP_STREAM_H_
+#ifndef TCP_STREAM_H
+#define TCP_STREAM_H
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-#include "InputStream.h"
-#include "OutputStream.h"
-#include <stdint.h>
+#include "Stream.h"
 
 #if defined(_WIN32) || defined(_WIN64)
-    #include <winsock2.h>
-    #include <ws2tcpip.h>
-    typedef SOCKET TCP_SOCKET;
+#  include <winsock2.h>
+#  include <ws2tcpip.h>
+#  include <windows.h>
+typedef SOCKET TCPStream_Socket;
 #else
-    #include <sys/types.h>
-    #include <sys/socket.h>
-    #include <netinet/in.h>
-    #include <netdb.h>
-    typedef int TCP_SOCKET;
+#  include <pthread.h>
+#  include <sys/types.h>
+#  include <sys/socket.h>
+#  include <netinet/in.h>
+#  include <arpa/inet.h>
+#  include <netdb.h>
+#  include <unistd.h>
+#  include <fcntl.h>
+#  include <errno.h>
+#  include <sys/epoll.h>
+typedef int TCPStream_Socket;
 #endif
 
-struct __TCPStream;
+// Forward declaration
 typedef struct __TCPStream TCPStream;
 
-// Event codes for callback
-typedef enum {
-    TCPStream_Event_Connected = 1,
-    TCPStream_Event_ConnectFailed,
-    TCPStream_Event_Disconnected
-} TCPStream_Event;
+// ===== Callback Typedefs =====
+typedef void (*TCPStream_OnConnectFn)(TCPStream* stream);
+typedef void (*TCPStream_OnDisconnectFn)(TCPStream* stream);
+typedef void (*TCPStream_OnErrorFn)(TCPStream* stream, int err);
 
-// Event callback signature: event + platform errno (or 0)
-typedef void (*TCPStream_EventCb)(TCPStream* stream, TCPStream_Event event, int err, void* userArg);
-
+// ===== TCPStream Structure =====
 struct __TCPStream {
-    void*           Args;
-    intptr_t        Context;        // socket (cast to intptr_t) or -1
-    StreamIn        Input;
-    StreamOut       Output;
+    void*                   Args;
+    TCPStream_Socket        Socket;
+    StreamIn                Input;
+    StreamOut               Output;
 
 #if defined(_WIN32) || defined(_WIN64)
-    HANDLE          PollThread;
-    HANDLE          StopEvent;
+    HANDLE                  Thread;
+    CRITICAL_SECTION        Mutex;
 #else
-    pthread_t       PollThread;
+    pthread_t               Thread;
+    pthread_mutex_t         Mutex;
+    int                     EpollFD;
 #endif
 
-    // reconnect policy
-    uint8_t         ReconnectEnabled;
-    uint32_t        ReconnectDelayMs;
+    uint8_t                 Connected;
+    uint8_t                 AutoReconnect;
+    uint32_t                ReconnectDelay;      // in milliseconds
 
-    // event callback
-    TCPStream_EventCb EventCb;
-    void*           EventCbArg;
+    char                    Host[128];
+    uint16_t                Port;
 
-    // internal state
-    uint8_t         Connected;
+    TCPStream_OnConnectFn    OnConnect;
+    TCPStream_OnDisconnectFn OnDisconnect;
+    TCPStream_OnErrorFn      OnError;
+
+    uint8_t                 Running;
 };
 
-// Primary init with host + port
+// ===== Public API =====
+
+// --- Initialization ---
 uint8_t TCPStream_init(
     TCPStream*      stream,
-    const char*     address,    // hostname or IP
-    uint16_t        port,
+    const char*     address,    // "192.168.1.10"
+    uint16_t        port,       // 8080
     uint8_t*        rxBuff,
     Stream_LenType  rxBuffSize,
     uint8_t*        txBuff,
     Stream_LenType  txBuffSize
 );
 
-// Alternative init taking "host:port" URI
 uint8_t TCPStream_initUri(
     TCPStream*      stream,
-    const char*     hostport,   // "host:port" or "ip:port"
+    const char*     uri,        // "example.com:8080"
     uint8_t*        rxBuff,
     Stream_LenType  rxBuffSize,
     uint8_t*        txBuff,
     Stream_LenType  txBuffSize
 );
 
+// --- Lifecycle ---
 uint8_t TCPStream_close(TCPStream* stream);
-
 uint8_t TCPStream_isConnected(TCPStream* stream);
 
-// Configure reconnect
-void TCPStream_setReconnect(TCPStream* stream, uint8_t enable, uint32_t delay_ms);
+// --- Reconnect ---
+void TCPStream_enableReconnect(TCPStream* stream, uint8_t enable, uint32_t delay_ms);
 
-// Register event callback
-void TCPStream_setEventCallback(TCPStream* stream, TCPStream_EventCb cb, void* userArg);
+// --- Callback Registration ---
+void TCPStream_onConnect(TCPStream* stream, TCPStream_OnConnectFn cb);
+void TCPStream_onDisconnect(TCPStream* stream, TCPStream_OnDisconnectFn cb);
+void TCPStream_onError(TCPStream* stream, TCPStream_OnErrorFn cb);
 
 #ifdef __cplusplus
-};
+}
 #endif
 
-#endif
+#endif // TCP_STREAM_H
