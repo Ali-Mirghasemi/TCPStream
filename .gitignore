@@ -1,0 +1,10 @@
+.vscode/
+*.o
+*.layout
+*.depend
+*.cci
+*.h~
+*.hci
+*.c~
+*.exe
+build/
