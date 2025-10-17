@@ -5,7 +5,8 @@
 extern "C" {
 #endif
 
-#include "Stream.h"
+#include "InputStream.h"
+#include "OutputStream.h"
 
 #if defined(_WIN32) || defined(_WIN64)
 #  include <winsock2.h>
@@ -27,6 +28,7 @@ typedef int TCPStream_Socket;
 #endif
 
 // Forward declaration
+struct __TCPStream;
 typedef struct __TCPStream TCPStream;
 
 // ===== Callback Typedefs =====

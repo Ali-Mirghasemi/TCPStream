@@ -32,7 +32,7 @@ void onError(TCPStream* s, int err) {
 
 int main() {
     // Initialize TCPStream
-    if(!TCPStream_initUri(&stream, "127.0.0.1:9000", rxBuff, RX_BUF_SIZE, txBuff, TX_BUF_SIZE)) {
+    if(!TCPStream_initUri(&stream, "192.168.1.10:65321", rxBuff, RX_BUF_SIZE, txBuff, TX_BUF_SIZE)) {
         printf("Failed to initialize TCPStream\n");
         return 1;
     }
@@ -51,10 +51,8 @@ int main() {
         // --- Echo received data ---
         Stream_LenType len = IStream_available(&stream.Input);
         if(len > 0) {
-            uint8_t* data = IStream_getDataPtr(&stream.Input);
-            // Send back the same data
-            OStream_write(&stream.Output, data, len);
-            IStream_commit(&stream.Input, len); // consume data
+            OStream_writeStream(&stream.Output, &stream.Input.Buffer, len);
+            OStream_flush(&stream.Output);
         }
 
         // --- Send counter every 5 seconds ---
@@ -64,7 +62,8 @@ int main() {
         if(now - lastTime >= 5000) {
             char buf[64];
             int n = snprintf(buf, sizeof(buf), "Counter: %u\n", counter++);
-            OStream_write(&stream.Output, (uint8_t*)buf, n);
+            OStream_writeBytes(&stream.Output, (uint8_t*)buf, n);
+            OStream_flush(&stream.Output);
             lastTime = now;
         }
 #else
@@ -74,7 +73,8 @@ int main() {
         if(now - lastTime >= 5000) {
             char buf[64];
             int n = snprintf(buf, sizeof(buf), "Counter: %u\n", counter++);
-            OStream_write(&stream.Output, (uint8_t*)buf, n);
+            OStream_writeBytes(&stream.Output, (uint8_t*)buf, n);
+            OStream_flush(&stream.Output);
             lastTime = now;
         }
 #endif

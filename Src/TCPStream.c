@@ -31,17 +31,49 @@ static Stream_MutexResult TCPStream_mutexInit(StreamBuffer* stream, Stream_Mutex
 static Stream_MutexResult TCPStream_mutexLock(StreamBuffer* stream, Stream_Mutex* mutex);
 static Stream_MutexResult TCPStream_mutexUnlock(StreamBuffer* stream, Stream_Mutex* mutex);
 static Stream_MutexResult TCPStream_mutexDeInit(StreamBuffer* stream, Stream_Mutex* mutex);
+#endif
 
-#define __initMutex(STREAM) \
-    IStream_setMutex(&(STREAM)->Input, TCPStream_mutexInit, TCPStream_mutexLock, TCPStream_mutexUnlock, TCPStream_mutexDeInit); \
-    OStream_setMutex(&(STREAM)->Output, TCPStream_mutexInit, TCPStream_mutexLock, TCPStream_mutexUnlock, TCPStream_mutexDeInit); \
-    IStream_mutexInit(&(STREAM)->Input); \
-    OStream_mutexInit(&(STREAM)->Output)
+// Mutex macro mapping (unchanged semantics)
+#if STREAM_MUTEX
+    #if STREAM_MUTEX == STREAM_MUTEX_CUSTOM
+        #define __initMutex(STREAM)                 IStream_setMutex(&(STREAM)->Input, TCPStream_mutexInit, TCPStream_mutexLock, TCPStream_mutexUnlock, TCPStream_mutexDeInit); \
+                                                    OStream_setMutex(&(STREAM)->Output, TCPStream_mutexInit, TCPStream_mutexLock, TCPStream_mutexUnlock, TCPStream_mutexDeInit); \
+                                                    IStream_mutexInit(&(STREAM)->Input); \
+                                                    OStream_mutexInit(&(STREAM)->Output)
+    #elif STREAM_MUTEX == STREAM_MUTEX_DRIVER
+        static const Stream_MutexDriver TCPStream_MutexDriver = {
+            .init = TCPStream_mutexInit,
+            .lock = TCPStream_mutexLock,
+            .unlock = TCPStream_mutexUnlock,
+            .deinit = TCPStream_mutexDeInit
+        };
+
+        #define __initMutex(STREAM)                 IStream_setMutex(&(STREAM)->Input, &TCPStream_MutexDriver); \
+                                                    OStream_setMutex(&(STREAM)->Output, &TCPStream_MutexDriver); \
+                                                    IStream_mutexInit(&(STREAM)->Input); \
+                                                    OStream_mutexInit(&(STREAM)->Output)
+    #elif STREAM_MUTEX == STREAM_MUTEX_GLOBAL_DRIVER
+        static const Stream_MutexDriver TCPStream_MutexDriver = {
+            .init = TCPStream_mutexInit,
+            .lock = TCPStream_mutexLock,
+            .unlock = TCPStream_mutexUnlock,
+            .deinit = TCPStream_mutexDeInit
+        };
+
+        #define __initMutex(STREAM)                 IStream_setMutex(&TCPStream_MutexDriver); \
+                                                    OStream_setMutex(&TCPStream_MutexDriver); \
+                                                    IStream_mutexInit(&(STREAM)->Input); \
+                                                    OStream_mutexInit(&(STREAM)->Output)
+    #endif
+
+    #define __lockMutex(STREAM)                 Stream_mutexLock(&(STREAM)->Buffer)
+    #define __unlockMutex(STREAM)               Stream_mutexUnlock(&(STREAM)->Buffer)
+    #define __deinitMutex(STREAM)               Stream_mutexDeInit(&(STREAM)->Buffer)
 #else
-#define __initMutex(STREAM)
-#define __lockMutex(STREAM)
-#define __unlockMutex(STREAM)
-#define __deinitMutex(STREAM)
+    #define __initMutex(STREAM)                 // No mutex
+    #define __lockMutex(STREAM)                 // No mutex
+    #define __unlockMutex(STREAM)               // No mutex
+    #define __deinitMutex(STREAM)               // No mutex
 #endif
 
 // ===== Callback Setters =====
@@ -323,7 +355,6 @@ uint8_t TCPStream_close(TCPStream* stream) {
 #endif
     IStream_deinit(&stream->Input);
     OStream_deinit(&stream->Output);
-    __deinitMutex(stream);
     stream->Connected = 0;
     return 1;
 }
@@ -334,45 +365,101 @@ uint8_t TCPStream_isConnected(TCPStream* stream) {
 }
 
 #if STREAM_MUTEX
-#include <stdlib.h>
+#include <errno.h>
 
 static Stream_MutexResult TCPStream_mutexInit(StreamBuffer* stream, Stream_Mutex* mutex) {
+    if (!stream) {
+        return (Stream_MutexResult) EINVAL;
+    }
+
 #if defined(_WIN32) || defined(_WIN64)
-    InitializeCriticalSection((CRITICAL_SECTION*)&stream->Mutex);
+    CRITICAL_SECTION* cs = (CRITICAL_SECTION*) malloc(sizeof(CRITICAL_SECTION));
+    if (!cs) {
+        return (Stream_MutexResult) ENOMEM;
+    }
+    InitializeCriticalSection(cs);
+    stream->Mutex = (void*)cs;
 #else
+    pthread_mutex_t* new_mutex = malloc(sizeof(pthread_mutex_t));
+    if (!new_mutex) {
+        return (Stream_MutexResult) ENOMEM;
+    }
+
     pthread_mutexattr_t attr;
-    pthread_mutexattr_init(&attr);
-    pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_RECURSIVE);
-    pthread_mutex_init((pthread_mutex_t*)&stream->Mutex, &attr);
+    int ret = pthread_mutexattr_init(&attr);
+    if (ret != 0) {
+        free(new_mutex);
+        return (Stream_MutexResult) ret;
+    }
+
+    ret = pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_RECURSIVE);
+    if (ret != 0) {
+        pthread_mutexattr_destroy(&attr);
+        free(new_mutex);
+        return (Stream_MutexResult) ret;
+    }
+
+    ret = pthread_mutex_init(new_mutex, &attr);
     pthread_mutexattr_destroy(&attr);
+    if (ret != 0) {
+        free(new_mutex);
+        return (Stream_MutexResult) ret;
+    }
+
+    stream->Mutex = (void*)new_mutex;
 #endif
+
     return Stream_Ok;
 }
 
 static Stream_MutexResult TCPStream_mutexLock(StreamBuffer* stream, Stream_Mutex* mutex) {
+    if (!stream || !stream->Mutex) {
+        return (Stream_MutexResult) EINVAL;
+    }
+
 #if defined(_WIN32) || defined(_WIN64)
-    EnterCriticalSection((CRITICAL_SECTION*)&stream->Mutex);
-#else
-    pthread_mutex_lock((pthread_mutex_t*)&stream->Mutex);
-#endif
+    EnterCriticalSection((CRITICAL_SECTION*)stream->Mutex);
     return Stream_Ok;
+#else
+    return (Stream_MutexResult) pthread_mutex_lock((pthread_mutex_t*)stream->Mutex);
+#endif
 }
 
 static Stream_MutexResult TCPStream_mutexUnlock(StreamBuffer* stream, Stream_Mutex* mutex) {
+    if (!stream || !stream->Mutex) {
+        return (Stream_MutexResult) EINVAL;
+    }
+
 #if defined(_WIN32) || defined(_WIN64)
-    LeaveCriticalSection((CRITICAL_SECTION*)&stream->Mutex);
-#else
-    pthread_mutex_unlock((pthread_mutex_t*)&stream->Mutex);
-#endif
+    LeaveCriticalSection((CRITICAL_SECTION*)stream->Mutex);
     return Stream_Ok;
+#else
+    return (Stream_MutexResult) pthread_mutex_unlock((pthread_mutex_t*)stream->Mutex);
+#endif
 }
 
 static Stream_MutexResult TCPStream_mutexDeInit(StreamBuffer* stream, Stream_Mutex* mutex) {
+    if (!stream) {
+        return (Stream_MutexResult) EINVAL;
+    }
+
 #if defined(_WIN32) || defined(_WIN64)
-    DeleteCriticalSection((CRITICAL_SECTION*)&stream->Mutex);
-#else
-    pthread_mutex_destroy((pthread_mutex_t*)&stream->Mutex);
-#endif
+    if (stream->Mutex) {
+        CRITICAL_SECTION* cs = (CRITICAL_SECTION*)stream->Mutex;
+        DeleteCriticalSection(cs);
+        free(cs);
+        stream->Mutex = NULL;
+    }
     return Stream_Ok;
-}
+#else
+    pthread_mutex_t* mutex_ptr = (pthread_mutex_t*)stream->Mutex;
+    int ret = pthread_mutex_destroy(mutex_ptr);
+    free(mutex_ptr);
+    stream->Mutex = NULL;
+    if (ret != 0) {
+        return (Stream_MutexResult) ret;
+    }
+    return Stream_Ok;
 #endif
+}
+#endif // STREAM_MUTEX
