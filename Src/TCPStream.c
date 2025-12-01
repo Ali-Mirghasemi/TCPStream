@@ -2,21 +2,11 @@
 #include <string.h>
 #include <stdio.h>
 
-#if defined(_WIN32) || defined(_WIN64)
-#  include <process.h>
-#  define THREAD_RET unsigned __stdcall
-#else
-#  include <stdlib.h>
-#  include <unistd.h>
-#  include <fcntl.h>
-#  define THREAD_RET void*
-#endif
-
 #if TCPSTREAM_LIB_LOG
-#  include "Log.h"
+    #include "Log.h"
 #else
-#  define logInfo(...)
-#  define logError(...)
+    #define logInfo(...)
+    #define logError(...)
 #endif
 
 // ===== Internal Helpers =====

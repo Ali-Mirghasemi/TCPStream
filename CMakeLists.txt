@@ -52,6 +52,33 @@ if(ENABLE_PLATFORM_DETECTION AND NOT MSVC)
 endif()
 
 # ============================================================
+# === Platform-specific settings ===
+# ============================================================
+if(WIN32)
+    # Windows-specific settings for sockets
+    add_definitions(-DWIN32_LEAN_AND_MEAN)
+    add_definitions(-D_WIN32_WINNT=0x0600)  # Windows Vista or later
+    
+    # System libraries needed for Windows sockets
+    set(SYSTEM_LIBS ws2_32)
+    message(STATUS "Adding Windows system libraries: ${SYSTEM_LIBS}")
+    
+    # Enable parallel builds for MSVC
+    if(MSVC)
+        add_compile_options(/MP)  # Multi-processor compilation
+        add_compile_options(/W3)  # Warning level 3
+    endif()
+elseif(UNIX AND NOT APPLE)
+    # Linux-specific system libraries
+    set(SYSTEM_LIBS pthread)
+    message(STATUS "Adding Linux system libraries: ${SYSTEM_LIBS}")
+elseif(APPLE)
+    # macOS specific
+    set(SYSTEM_LIBS "")
+    message(STATUS "Building for macOS")
+endif()
+
+# ============================================================
 # === Source and Header Directories ===
 # ============================================================
 set(LIBRARY_SRC_DIR ${CMAKE_CURRENT_SOURCE_DIR}/Src)
@@ -158,10 +185,30 @@ if(${LIB_NAME_UPPER}_BUILD_SHARED_LIB)
         $<BUILD_INTERFACE:${LIBRARY_SRC_DIR}>
         $<INSTALL_INTERFACE:include>
     )
-    target_compile_features(${SHARED_TARGET} PUBLIC c_std_99)
+    
+    # Use consistent C standard
+    set_target_properties(${SHARED_TARGET} PROPERTIES
+        C_STANDARD 11
+        C_STANDARD_REQUIRED ON
+        C_EXTENSIONS OFF
+    )
+    
     target_compile_definitions(${SHARED_TARGET} PRIVATE ${LIB_NAME_UPPER}_EXPORTS)
+    
+    # Add Windows socket definitions
+    if(WIN32)
+        target_compile_definitions(${SHARED_TARGET} PRIVATE WIN32_LEAN_AND_MEAN)
+        target_compile_definitions(${SHARED_TARGET} PRIVATE _WIN32_WINNT=0x0600)
+    endif()
+    
+    # Link dependencies
     target_link_libraries(${SHARED_TARGET} PUBLIC ${STREAM_LIB})
     target_link_libraries(${SHARED_TARGET} PUBLIC ${LOG_LIB})
+    
+    # Link system libraries
+    if(SYSTEM_LIBS)
+        target_link_libraries(${SHARED_TARGET} PUBLIC ${SYSTEM_LIBS})
+    endif()
 
     set_target_properties(${SHARED_TARGET} PROPERTIES
         PUBLIC_HEADER "${LIBRARY_HEADERS}"
@@ -195,9 +242,28 @@ if(${LIB_NAME_UPPER}_BUILD_STATIC_LIB)
         $<BUILD_INTERFACE:${LIBRARY_SRC_DIR}>
         $<INSTALL_INTERFACE:include>
     )
-    target_compile_features(${STATIC_TARGET} PUBLIC c_std_99)
+    
+    # Use consistent C standard
+    set_target_properties(${STATIC_TARGET} PROPERTIES
+        C_STANDARD 11
+        C_STANDARD_REQUIRED ON
+        C_EXTENSIONS OFF
+    )
+    
+    # Add Windows socket definitions
+    if(WIN32)
+        target_compile_definitions(${STATIC_TARGET} PRIVATE WIN32_LEAN_AND_MEAN)
+        target_compile_definitions(${STATIC_TARGET} PRIVATE _WIN32_WINNT=0x0600)
+    endif()
+    
+    # Link dependencies
     target_link_libraries(${STATIC_TARGET} PUBLIC ${STREAM_LIB})
     target_link_libraries(${STATIC_TARGET} PUBLIC ${LOG_LIB})
+    
+    # Link system libraries (CRITICAL: This was missing!)
+    if(SYSTEM_LIBS)
+        target_link_libraries(${STATIC_TARGET} PUBLIC ${SYSTEM_LIBS})
+    endif()
 
     set_target_properties(${STATIC_TARGET} PROPERTIES
         PUBLIC_HEADER "${LIBRARY_HEADERS}"
@@ -227,6 +293,12 @@ if(${LIB_NAME_UPPER}_BUILD_EXAMPLES)
         if(EXAMPLE_SOURCES)
             add_executable(${EXAMPLE_NAME} ${EXAMPLE_SOURCES})
             target_include_directories(${EXAMPLE_NAME} PRIVATE ${LIBRARY_SRC_DIR})
+            
+            # Add Windows socket definitions for examples too
+            if(WIN32)
+                target_compile_definitions(${EXAMPLE_NAME} PRIVATE WIN32_LEAN_AND_MEAN)
+                target_compile_definitions(${EXAMPLE_NAME} PRIVATE _WIN32_WINNT=0x0600)
+            endif()
 
             if(TARGET ${STATIC_TARGET})
                 target_link_libraries(${EXAMPLE_NAME} PRIVATE ${STATIC_TARGET})
@@ -235,6 +307,11 @@ if(${LIB_NAME_UPPER}_BUILD_EXAMPLES)
             endif()
 
             target_link_libraries(${EXAMPLE_NAME} PRIVATE ${STREAM_LIB})
+            
+            # Link system libraries for examples (CRITICAL!)
+            if(SYSTEM_LIBS)
+                target_link_libraries(${EXAMPLE_NAME} PRIVATE ${SYSTEM_LIBS})
+            endif()
 
             if(${LIB_NAME_UPPER}_LIB_LOG)
                 target_link_libraries(${EXAMPLE_NAME} PRIVATE Log::HeaderOnly)
@@ -242,7 +319,11 @@ if(${LIB_NAME_UPPER}_BUILD_EXAMPLES)
             endif()
 
             set_target_properties(${EXAMPLE_NAME} PROPERTIES
-                RUNTIME_OUTPUT_DIRECTORY ${EXAMPLES_OUTPUT_DIR})
+                RUNTIME_OUTPUT_DIRECTORY ${EXAMPLES_OUTPUT_DIR}
+                C_STANDARD 11
+                C_STANDARD_REQUIRED ON
+                C_EXTENSIONS OFF
+            )
 
             if(CMAKE_BUILD_TYPE STREQUAL "Release" AND CMAKE_STRIP)
                 add_custom_command(TARGET ${EXAMPLE_NAME}
