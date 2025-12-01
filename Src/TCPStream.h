@@ -9,13 +9,6 @@ extern "C" {
 #include "OutputStream.h"
 
 #if defined(_WIN32) || defined(_WIN64)
-    #define WIN32_LEAN_AND_MEAN
-    #define _WIN32_WINNT 0x0600
-    
-    #ifndef _WINSOCKAPI_
-        #define _WINSOCKAPI_   // Prevent winsock.h from being included by windows.h
-    #endif
-
     #include <winsock2.h>
     #include <ws2tcpip.h>
     #include <windows.h>
@@ -34,11 +27,12 @@ extern "C" {
     #include <errno.h>
     #include <sys/epoll.h>
     typedef int TCPStream_Socket;
-    #include <stdlib.h>
     #include <unistd.h>
     #include <fcntl.h>
     #define THREAD_RET void*
 #endif
+#include <string.h>
+#include <stdlib.h>
 
 // Forward declaration
 struct __TCPStream;
