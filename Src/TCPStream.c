@@ -22,7 +22,7 @@
 // ===== Internal Helpers =====
 static void TCPStream_errorHandle(TCPStream* stream, int err);
 static Stream_Result TCPStream_transmit(StreamOut* stream, uint8_t* buff, Stream_LenType len);
-static void* TCPStream_pollThread(void* arg);
+static THREAD_RET TCPStream_pollThread(void* arg);
 static int TCPStream_setNonBlocking(TCPStream_Socket sock);
 
 // ===== Mutex helpers =====
