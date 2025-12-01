@@ -30,6 +30,10 @@ void onError(TCPStream* s, int err) {
     printf("[ERROR] TCP error: %d\n", err);
 }
 
+void onReceive(StreamIn* stream, Stream_LenType len) {
+    printf("[INFO] Data Received: %u!\n", len);
+}
+
 int main() {
     // Initialize TCPStream
     if(!TCPStream_initUri(&stream, "192.168.1.10:65321", rxBuff, RX_BUF_SIZE, txBuff, TX_BUF_SIZE)) {
@@ -45,13 +49,15 @@ int main() {
     // Enable auto reconnect every 3 seconds
     TCPStream_enableReconnect(&stream, 1, 3000);
 
+    IStream_onReceive(&stream.Input, onReceive);
+
     uint32_t counter = 0;
 
     while(1) {
         // --- Echo received data ---
         Stream_LenType len = IStream_available(&stream.Input);
         if(len > 0) {
-            OStream_writeStream(&stream.Output, &stream.Input.Buffer, len);
+            OStream_writeStream(&stream.Output, &stream.Input, len);
             OStream_flush(&stream.Output);
         }
 

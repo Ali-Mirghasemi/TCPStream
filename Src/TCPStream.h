@@ -1,5 +1,5 @@
-#ifndef TCP_STREAM_H
-#define TCP_STREAM_H
+#ifndef _TCP_STREAM_H_
+#define _TCP_STREAM_H_
 
 #ifdef __cplusplus
 extern "C" {
