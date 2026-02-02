@@ -299,6 +299,8 @@ if(${LIB_NAME_UPPER}_BUILD_EXAMPLES)
             if(WIN32)
                 target_compile_definitions(${EXAMPLE_NAME} PRIVATE WIN32_LEAN_AND_MEAN)
                 target_compile_definitions(${EXAMPLE_NAME} PRIVATE _WIN32_WINNT=0x0600)
+            elseif(UNIX)
+                target_compile_definitions(${EXAMPLE_NAME} PRIVATE _POSIX_C_SOURCE=200809L)
             endif()
 
             if(TARGET ${STATIC_TARGET})

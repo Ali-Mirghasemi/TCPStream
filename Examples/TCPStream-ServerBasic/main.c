@@ -43,6 +43,18 @@ void onClientConnect(TCPServerStream* s, TCPStream* client) {
     IStream_onReceive(&client->Input, onReceive);
 }
 
+static void sleep_ms(unsigned int ms)
+{
+#if defined(_WIN32) || defined(_WIN64)
+    Sleep(ms);
+#else
+    struct timespec ts;
+    ts.tv_sec = ms / 1000;
+    ts.tv_nsec = (ms % 1000) * 1000000L;
+    nanosleep(&ts, NULL);
+#endif
+}
+
 int main() {
     // Initialize server
     if(!TCPServerStream_init(&server, "0.0.0.0", 65321, MAX_CLIENTS, TCPServerStream_Mode_ThreadPerClient)) {
@@ -88,11 +100,7 @@ int main() {
             lastTime = now;
         }
 
-#if defined(_WIN32) || defined(_WIN64)
-        Sleep(10);
-#else
-        usleep(10000);
-#endif
+        sleep_ms(10);
     }
 
     TCPServerStream_close(&server);

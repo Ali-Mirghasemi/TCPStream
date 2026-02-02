@@ -34,6 +34,18 @@ void onReceive(StreamIn* stream, Stream_LenType len) {
     printf("[INFO] Data Received: %u!\n", len);
 }
 
+static void sleep_ms(unsigned int ms)
+{
+#if defined(_WIN32) || defined(_WIN64)
+    Sleep(ms);
+#else
+    struct timespec ts;
+    ts.tv_sec = ms / 1000;
+    ts.tv_nsec = (ms % 1000) * 1000000L;
+    nanosleep(&ts, NULL);
+#endif
+}
+
 int main() {
     // Initialize TCPStream
     if(!TCPStream_initUri(&stream, "192.168.1.10:65321", rxBuff, RX_BUF_SIZE, txBuff, TX_BUF_SIZE)) {
@@ -85,11 +97,7 @@ int main() {
         }
 #endif
 
-#if defined(_WIN32) || defined(_WIN64)
-        Sleep(10); // small delay to reduce CPU usage
-#else
-        usleep(10000);
-#endif
+        sleep_ms(10); // small delay to reduce CPU usage
     }
 
     TCPStream_close(&stream);
