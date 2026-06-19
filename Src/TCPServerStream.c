@@ -74,14 +74,23 @@ static int TCPServerStream_setNonBlocking(TCPStream_Socket sock) {
 }
 
 // ===== Server Initialization =====
-uint8_t TCPServerStream_init(TCPServerStream* server, const char* host, uint16_t port,
-                             uint16_t maxClients, TCPServerStream_Mode mode) {
+uint8_t TCPServerStream_init(
+    TCPServerStream* server, 
+    const char* host, 
+    uint16_t port,
+    uint16_t maxClients,
+    uint16_t rxBufferSize,
+    uint16_t txBufferSize,
+    TCPServerStream_Mode mode
+) {
     if(!server) return 0;
     memset(server, 0, sizeof(TCPServerStream));
 
     strncpy(server->Host, host, sizeof(server->Host)-1);
     server->Port = port;
     server->MaxClients = maxClients;
+    server->TxBufferSize = txBufferSize;
+    server->RxBufferSize = rxBufferSize;
     server->Mode = mode;
 
     server->Clients = (TCPStream**)malloc(sizeof(TCPStream*) * maxClients);
@@ -152,6 +161,9 @@ static void TCPServerStream_removeClient(TCPServerStream* server, TCPStream* cli
     if(client) {
         if(client->Input.Buffer.Data) free(client->Input.Buffer.Data);
         if(client->Output.Buffer.Data) free(client->Output.Buffer.Data);
+    #if !(defined(_WIN32) || defined(_WIN64))
+        if(client->EpollFD > 0) close(client->EpollFD);
+    #endif
         TCPStream_close(client);
         free(client);
     }
@@ -195,21 +207,32 @@ static THREAD_RET TCPServerStream_acceptThread(void* arg) {
         memset(client, 0, sizeof(TCPStream));
         client->Socket = clientSock;
         client->Connected = 1;
+        client->Running = 1;
+
+        // --- Store the client's remote host/port ---
+    #if defined(_WIN32) || defined(_WIN64)
+        InetNtopA(AF_INET, &clientAddr.sin_addr, client->Host, sizeof(client->Host));
+    #else
+        inet_ntop(AF_INET, &clientAddr.sin_addr, client->Host, sizeof(client->Host));
+    #endif
+        client->Port = ntohs(clientAddr.sin_port);
+
+        TCPServerStream_setNonBlocking(clientSock);
 
         // Allocate RX/TX buffers
-        client->Input.Buffer.Size = DEFAULT_CLIENT_BUFF_SIZE;
-        client->Output.Buffer.Size = DEFAULT_CLIENT_BUFF_SIZE;
+        client->Input.Buffer.Size = server->RxBufferSize;
+        client->Output.Buffer.Size = server->TxBufferSize;
         client->Input.Buffer.Data = (uint8_t*)malloc(client->Input.Buffer.Size);
         client->Output.Buffer.Data = (uint8_t*)malloc(client->Output.Buffer.Size);
         if(!client->Input.Buffer.Data || !client->Output.Buffer.Data) {
             if(client->Input.Buffer.Data) free(client->Input.Buffer.Data);
             if(client->Output.Buffer.Data) free(client->Output.Buffer.Data);
             free(client);
-#if defined(_WIN32) || defined(_WIN64)
+    #if defined(_WIN32) || defined(_WIN64)
             closesocket(clientSock);
-#else
+    #else
             close(clientSock);
-#endif
+    #endif
             continue;
         }
 
@@ -219,6 +242,32 @@ static THREAD_RET TCPServerStream_acceptThread(void* arg) {
         OStream_setDriverArgs(&client->Output, client);
         IStream_setDriverArgs(&client->Input, client);
         __initMutex(client);
+
+    #if !(defined(_WIN32) || defined(_WIN64))
+        // --- Set up this client's epoll instance (was missing -> epoll_wait(0,...) = EINVAL) ---
+        client->EpollFD = epoll_create1(0);
+        if(client->EpollFD < 0) {
+            logError("epoll_create1 failed for client: %d", errno);
+            free(client->Input.Buffer.Data);
+            free(client->Output.Buffer.Data);
+            free(client);
+            close(clientSock);
+            continue;
+        }
+        struct epoll_event ev;
+        memset(&ev, 0, sizeof(ev));
+        ev.events = EPOLLIN | EPOLLOUT | EPOLLET;
+        ev.data.fd = clientSock;
+        if(epoll_ctl(client->EpollFD, EPOLL_CTL_ADD, clientSock, &ev) < 0) {
+            logError("epoll_ctl failed for client: %d", errno);
+            close(client->EpollFD);
+            free(client->Input.Buffer.Data);
+            free(client->Output.Buffer.Data);
+            free(client);
+            close(clientSock);
+            continue;
+        }
+    #endif
 
         // Add to server list
         for(uint16_t i = 0; i < server->MaxClients; i++) {
@@ -240,6 +289,7 @@ static THREAD_RET TCPServerStream_acceptThread(void* arg) {
         if (pthread_create(&client->Thread, NULL, TCPStream_pollThread, client) != 0) {
             // Free Client
             TCPServerStream_removeClient(server, client);
+            continue;
         }
         pthread_detach(client->Thread);
     #endif

@@ -38,6 +38,8 @@ struct __TCPServerStream {
     char Host[128];
     uint16_t Port;
     uint16_t MaxClients;
+    uint16_t TxBufferSize;
+    uint16_t RxBufferSize;
     TCPServerStream_Mode Mode;
 
     TCPServerStream_OnClientConnectFn OnClientConnect;
@@ -54,6 +56,8 @@ uint8_t TCPServerStream_init(
     const char* host,
     uint16_t port,
     uint16_t maxClients,
+    uint16_t rxBufferSize,
+    uint16_t txBufferSize,
     TCPServerStream_Mode mode
 );
 
@@ -67,4 +71,4 @@ void TCPServerStream_onClientConnect(TCPServerStream* server, TCPServerStream_On
 }
 #endif
 
-#endif // TCP_SERVER_STREAM_H
+#endif // _TCP_SERVER_STREAM_H_

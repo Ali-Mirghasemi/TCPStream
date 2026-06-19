@@ -57,7 +57,7 @@ static void sleep_ms(unsigned int ms)
 
 int main() {
     // Initialize server
-    if(!TCPServerStream_init(&server, "0.0.0.0", 65321, MAX_CLIENTS, TCPServerStream_Mode_ThreadPerClient)) {
+    if(!TCPServerStream_init(&server, "0.0.0.0", 65321, MAX_CLIENTS, RX_BUF_SIZE, TX_BUF_SIZE, TCPServerStream_Mode_ThreadPerClient)) {
         printf("Failed to initialize TCPServerStream\n");
         return 1;
     }
