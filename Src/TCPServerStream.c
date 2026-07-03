@@ -122,6 +122,13 @@ uint8_t TCPServerStream_init(
     addr.sin_addr.s_addr = inet_addr(host);
 #else
     if(inet_pton(AF_INET, host, &addr.sin_addr) <= 0) return 0;
+    // Set SO_REUSEADDR
+    int opt = 1;
+
+    if (setsockopt(server->ListenSocket, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt))) {
+        logError("setsockopt");
+        return 0;
+    }
 #endif
 
     if(bind(server->ListenSocket, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
