@@ -78,6 +78,14 @@ elseif(APPLE)
     message(STATUS "Building for macOS")
 endif()
 
+if(UNIX AND NOT APPLE)
+    add_compile_definitions(
+        _POSIX_C_SOURCE=200809L
+        _DEFAULT_SOURCE
+        _GNU_SOURCE
+    )
+endif()
+
 # ============================================================
 # === Source and Header Directories ===
 # ============================================================

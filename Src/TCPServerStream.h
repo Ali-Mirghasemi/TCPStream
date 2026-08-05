@@ -49,8 +49,8 @@ struct __TCPServerStream {
     char Host[128];
     uint16_t Port;
     uint16_t MaxClients;
-    uint16_t TxBufferSize;
-    uint16_t RxBufferSize;
+    Stream_LenType TxBufferSize;
+    Stream_LenType RxBufferSize;
     TCPServerStream_Mode Mode;
 
     // Callbacks
@@ -72,8 +72,8 @@ uint8_t TCPServerStream_init(
     const char* host,
     uint16_t port,
     uint16_t maxClients,
-    uint16_t rxBufferSize,
-    uint16_t txBufferSize,
+    Stream_LenType rxBufferSize,
+    Stream_LenType txBufferSize,
     TCPServerStream_Mode mode
 );
 

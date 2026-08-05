@@ -240,8 +240,8 @@ uint8_t TCPServerStream_init(
     const char* host, 
     uint16_t port,
     uint16_t maxClients,
-    uint16_t rxBufferSize,
-    uint16_t txBufferSize,
+    Stream_LenType rxBufferSize,
+    Stream_LenType txBufferSize,
     TCPServerStream_Mode mode
 ) {
     if(!server) return 0;
