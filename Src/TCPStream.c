@@ -194,7 +194,7 @@ THREAD_RET TCPStream_pollThread(void* arg) {
                 // user does NOT free on disconnect).
                 if (stream->OnDisconnect) stream->OnDisconnect(stream);
 
-                if (!autoReconnect) {
+                if (!autoReconnect || (stream->Input.Buffer == NULL || stream->Output.Buffer == NULL)) {
                     // stream may already be freed -> stop immediately, touch nothing else
                     return 0;
                 }
@@ -216,9 +216,59 @@ THREAD_RET TCPStream_pollThread(void* arg) {
             } else {
 #if defined(_WIN32) || defined(_WIN64)
                 int err = WSAGetLastError();
-                if (err != WSAEWOULDBLOCK) TCPStream_errorHandle(stream, err);
+                if (err != WSAEWOULDBLOCK) {
+                    uint8_t autoReconnect = stream->AutoReconnect; // snapshot before callback
+                    uint32_t reconnectDelay = stream->ReconnectDelay;
+
+                    TCPStream_errorHandle(stream, err);
+                    
+                    if (!autoReconnect || (stream->Input.Buffer == NULL || stream->Output.Buffer == NULL)) {
+                        // stream may already be freed -> stop immediately, touch nothing else
+                        return 0;
+                    }
+
+                    // Reconnect path: only valid if caller guarantees `stream` wasn't freed
+                    // in OnDisconnect when AutoReconnect is enabled.
+    #if defined(_WIN32) || defined(_WIN64)
+                    Sleep(reconnectDelay);
+    #else
+                    usleep(reconnectDelay * 1000);
+    #endif
+                    stream->Running = 1;
+                    TCPStream_init(stream, stream->Host, stream->Port,
+                                IStream_getDataPtr(&stream->Input), stream->Input.Buffer.Size,
+                                OStream_getDataPtr(&stream->Output), stream->Output.Buffer.Size);
+                    // TCPStream_init starts a NEW poll thread for the reconnected stream,
+                    // so this (old) thread instance is done.
+                    return 0;
+                }
 #else
-                if (errno != EAGAIN && errno != EWOULDBLOCK) TCPStream_errorHandle(stream, errno);
+                if (errno != EAGAIN && errno != EWOULDBLOCK) {
+                    uint8_t autoReconnect = stream->AutoReconnect; // snapshot before callback
+                    uint32_t reconnectDelay = stream->ReconnectDelay;
+
+                    TCPStream_errorHandle(stream, errno);
+
+                    if (!autoReconnect || (stream->Input.Buffer == NULL || stream->Output.Buffer == NULL)) {
+                        // stream may already be freed -> stop immediately, touch nothing else
+                        return 0;
+                    }
+
+                    // Reconnect path: only valid if caller guarantees `stream` wasn't freed
+                    // in OnDisconnect when AutoReconnect is enabled.
+    #if defined(_WIN32) || defined(_WIN64)
+                    Sleep(reconnectDelay);
+    #else
+                    usleep(reconnectDelay * 1000);
+    #endif
+                    stream->Running = 1;
+                    TCPStream_init(stream, stream->Host, stream->Port,
+                                IStream_getDataPtr(&stream->Input), stream->Input.Buffer.Size,
+                                OStream_getDataPtr(&stream->Output), stream->Output.Buffer.Size);
+                    // TCPStream_init starts a NEW poll thread for the reconnected stream,
+                    // so this (old) thread instance is done.
+                    return 0;
+                }
 #endif
                 // --- Write Data (safe: connection still up, no disconnect happened) ---
                 OStream_handle(&stream->Output, 0);
