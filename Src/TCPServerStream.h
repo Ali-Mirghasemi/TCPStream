@@ -63,6 +63,7 @@ uint8_t TCPServerStream_init(
 
 // --- Lifecycle ---
 uint8_t TCPServerStream_close(TCPServerStream* server);
+void TCPServerStream_removeClient(TCPServerStream* server, TCPStream* client);
 
 // --- Callback Registration ---
 void TCPServerStream_onClientConnect(TCPServerStream* server, TCPServerStream_OnClientConnectFn cb);

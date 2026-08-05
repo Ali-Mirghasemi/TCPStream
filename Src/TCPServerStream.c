@@ -157,7 +157,7 @@ uint8_t TCPServerStream_init(
 }
 
 // ===== Remove Client =====
-static void TCPServerStream_removeClient(TCPServerStream* server, TCPStream* client) {
+void TCPServerStream_removeClient(TCPServerStream* server, TCPStream* client) {
     for(uint16_t i = 0; i < server->MaxClients; i++) {
         if(server->Clients[i] == client) {
             server->Clients[i] = NULL;
