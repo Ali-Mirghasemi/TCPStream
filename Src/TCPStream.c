@@ -1,3 +1,4 @@
+// ===== TCPStream.c (Fixed for Stream Library Compatibility) =====
 #include "TCPStream.h"
 #include <string.h>
 #include <stdio.h>
@@ -9,11 +10,23 @@
 #else
     #define logInfo(...)
     #define logError(...)
+    #define logDebug(...)
+    #define logWarn(...)
+#endif
+
+// ===== Platform Detection =====
+#if defined(_WIN32) || defined(_WIN64)
+    #define SOCKET_IS_VALID(s) ((s) != INVALID_SOCKET)
+    #define SOCKET_CLOSE(s) closesocket(s)
+#else
+    #define SOCKET_IS_VALID(s) ((s) >= 0)
+    #define SOCKET_CLOSE(s) close(s)
 #endif
 
 // ===== Internal Helpers =====
 THREAD_RET TCPStream_pollThread(void* arg);
 static void TCPStream_errorHandle(TCPStream* stream, int err);
+static void TCPStream_handleDisconnect(TCPStream* stream);
 static int TCPStream_setNonBlocking(TCPStream_Socket sock);
 
 Stream_Result TCPStream_transmit(StreamOut* stream, uint8_t* buff, Stream_LenType len);
@@ -29,12 +42,27 @@ __defineMutexDriver();
 #endif
 
 // ===== Callback Setters =====
-void TCPStream_onConnect(TCPStream* stream, TCPStream_OnConnectFn cb) { stream->OnConnect = cb; }
-void TCPStream_onDisconnect(TCPStream* stream, TCPStream_OnDisconnectFn cb) { stream->OnDisconnect = cb; }
-void TCPStream_onError(TCPStream* stream, TCPStream_OnErrorFn cb) { stream->OnError = cb; }
+void TCPStream_onConnect(TCPStream* stream, TCPStream_OnConnectFn cb) { 
+    if (stream) stream->OnConnect = cb; 
+}
+void TCPStream_onDisconnect(TCPStream* stream, TCPStream_OnDisconnectFn cb) { 
+    if (stream) stream->OnDisconnect = cb; 
+}
+void TCPStream_onError(TCPStream* stream, TCPStream_OnErrorFn cb) { 
+    if (stream) stream->OnError = cb; 
+}
+void TCPStream_setServerCallbacks(TCPStream* stream, void* serverContext, 
+                                   TCPStream_ServerOnDisconnectFn onDisconnect, 
+                                   TCPStream_ServerOnErrorFn onError) {
+    if (!stream) return;
+    stream->ServerContext = serverContext;
+    stream->ServerOnDisconnect = onDisconnect;
+    stream->ServerOnError = onError;
+}
 
 // ===== Reconnect =====
 void TCPStream_enableReconnect(TCPStream* stream, uint8_t enable, uint32_t delay_ms) {
+    if (!stream) return;
     stream->AutoReconnect = enable;
     stream->ReconnectDelay = delay_ms;
 }
@@ -53,22 +81,52 @@ static int TCPStream_setNonBlocking(TCPStream_Socket sock) {
 
 // ===== Internal Error Handler =====
 static void TCPStream_errorHandle(TCPStream* stream, int err) {
+    if (!stream) return;
     stream->Connected = 0;
     if(stream->OnError) stream->OnError(stream, err);
+    // Don't reset IO here - let disconnect handler do it
+}
+
+// ===== Handle Disconnect (cleanup and notify) =====
+static void TCPStream_handleDisconnect(TCPStream* stream) {
+    if (!stream) return;
+    
+    stream->Connected = 0;
+    stream->Running = 0;
+    
+    // Close socket
+    if (SOCKET_IS_VALID(stream->Socket)) {
+        SOCKET_CLOSE(stream->Socket);
+        stream->Socket = (TCPStream_Socket)(-1);
+    }
+    
+#if !(defined(_WIN32) || defined(_WIN64))
+    if (stream->EpollFD >= 0) {
+        close(stream->EpollFD);
+        stream->EpollFD = -1;
+    }
+#endif
+    
+    // Reset IO
     IStream_resetIO(&stream->Input);
     OStream_resetIO(&stream->Output);
+    
+    // Notify callbacks
+    if (stream->OnDisconnect) {
+        stream->OnDisconnect(stream);
+    }
 }
 
 // ===== Transmit Function =====
 Stream_Result TCPStream_transmit(StreamOut* stream, uint8_t* buff, Stream_LenType len) {
     TCPStream* tcp = (TCPStream*) OStream_getDriverArgs(stream);
-    if(!tcp || tcp->Socket <= 0 || !tcp->Connected) return Stream_NoTransmit;
+    if(!tcp || !SOCKET_IS_VALID(tcp->Socket) || !tcp->Connected) return Stream_NoTransmit;
 
 #if defined(_WIN32) || defined(_WIN64)
     int sent = send(tcp->Socket, (const char*)buff, (int)len, 0);
     int lastErr = (sent < 0) ? WSAGetLastError() : 0;
 #else
-    int sent = send(tcp->Socket, buff, len, 0);
+    int sent = send(tcp->Socket, buff, len, MSG_NOSIGNAL);
     int lastErr = (sent < 0) ? errno : 0;
 #endif
 
@@ -80,13 +138,14 @@ Stream_Result TCPStream_transmit(StreamOut* stream, uint8_t* buff, Stream_LenTyp
 #endif
         {
             TCPStream_errorHandle(tcp, lastErr);
+            TCPStream_handleDisconnect(tcp);
             return Stream_CustomError | lastErr;
         }
         return Stream_NoTransmit;
     }
 
     if(sent > 0) {
-        stream->Buffer.InTransmit = 1;
+        // Use OStream_handle to properly advance write position
         return OStream_handle(stream, sent);
     }
 
@@ -96,184 +155,264 @@ Stream_Result TCPStream_transmit(StreamOut* stream, uint8_t* buff, Stream_LenTyp
 // ===== Poll Thread =====
 THREAD_RET TCPStream_pollThread(void* arg) {
     TCPStream* stream = (TCPStream*)arg;
+    if (!stream) return 0;
+    
     stream->Running = 1;
 
     while (stream->Running) {
 #if defined(_WIN32) || defined(_WIN64)
+        // ===== Windows Path =====
         WSAPOLLFD fds[1];
         fds[0].fd = stream->Socket;
         fds[0].events = POLLIN | POLLOUT;
-        int timeout = INFINITE; // block indefinitely
+        int timeout = stream->Connected ? -1 : 100;
         int ret = WSAPoll(fds, 1, timeout);
-#else
-        struct epoll_event events[2];
-        int timeout = -1; // block indefinitely
-        int ret = epoll_wait(stream->EpollFD, events, 2, timeout);
-#endif
+        
         if (ret < 0) {
-#if defined(_WIN32) || defined(_WIN64)
             int err = WSAGetLastError();
-            if (err != WSAEINTR) TCPStream_errorHandle(stream, err);
-            if (err == WSAENOTSOCK) {
-                break;
+            if (err == WSAENOTSOCK) break;
+            if (err != WSAEINTR) {
+                TCPStream_errorHandle(stream, err);
+                TCPStream_handleDisconnect(stream);
+                if (!stream->AutoReconnect) return 0;
+                // Reconnect
+                Sleep(stream->ReconnectDelay);
+                stream->Running = 1;
+                TCPStream_init(stream, stream->Host, stream->Port,
+                             stream->Input.Buffer.Data, stream->Input.Buffer.Size,
+                             stream->Output.Buffer.Data, stream->Output.Buffer.Size);
+                return 0;
             }
-#else
-            if (errno != EINTR) TCPStream_errorHandle(stream, errno);
-#endif
             continue;
         }
-        if (ret == 0) continue; // timeout, just loop
-
-#if defined(_WIN32) || defined(_WIN64)
-        // --- Check connection completion ---
+        
+        // Check connection completion (timeout or event)
         if (!stream->Connected) {
             int optval = 0;
             int optlen = sizeof(optval);
             if (getsockopt(stream->Socket, SOL_SOCKET, SO_ERROR, (char*)&optval, &optlen) == 0) {
                 if (optval == 0) {
-                    // Connection established
+                    // Connected!
                     stream->Connected = 1;
+                    logInfo("TCPStream connected to %s:%d", stream->Host, stream->Port);
                     if (stream->OnConnect) stream->OnConnect(stream);
-                    logInfo("TCPStream connected");
                 } else {
                     // Connection failed
                     TCPStream_errorHandle(stream, optval);
-                    closesocket(stream->Socket);
-                    stream->Socket = 0;
+                    SOCKET_CLOSE(stream->Socket);
+                    stream->Socket = INVALID_SOCKET;
                     if (stream->AutoReconnect) {
                         Sleep(stream->ReconnectDelay);
+                        stream->Running = 1;
                         TCPStream_init(stream, stream->Host, stream->Port,
-                                       IStream_getDataPtr(&stream->Input), stream->Input.Buffer.Size,
-                                       OStream_getDataPtr(&stream->Output), stream->Output.Buffer.Size);
+                                     stream->Input.Buffer.Data, stream->Input.Buffer.Size,
+                                     stream->Output.Buffer.Data, stream->Output.Buffer.Size);
                     }
                     continue;
                 }
             }
+            if (ret == 0) continue; // Timeout, try again
         }
-#endif
-
-        // --- Read Data ---
-        if (stream->Connected) {
-            uint8_t* buf = IStream_getDataPtr(&stream->Input);
-            Stream_LenType len = IStream_directSpace(&stream->Input);
-            int read_bytes = 0;
-
-#if defined(_WIN32) || defined(_WIN64)
-            read_bytes = recv(stream->Socket, (char*)buf, (int)len, 0);
-#else
-            read_bytes = read(stream->Socket, buf, len);
-#endif
-            if (read_bytes > 0) {
-                stream->Input.Buffer.InReceive = 1;
-                stream->Input.Buffer.PendingBytes = read_bytes;
-                IStream_handle(&stream->Input, read_bytes);
-
-                // --- Write Data (safe: stream still alive, still connected) ---
-                OStream_handle(&stream->Output, 0);
-            } else if (read_bytes == 0) {
-                // --- Disconnected ---
-                // Do ALL of our own cleanup on `stream` BEFORE invoking the
-                // user callback, since OnDisconnect may free `stream`
-                // (e.g. TCPServerStream_removeClient on the server side).
-                stream->Connected = 0;
-                stream->Running = 0; // make sure no later iteration re-touches stream
-
-#if defined(_WIN32) || defined(_WIN64)
-                closesocket(stream->Socket);
-#else
-                close(stream->Socket);
-#endif
-                stream->Socket = 0;
-
-                uint8_t autoReconnect = stream->AutoReconnect; // snapshot before callback
-                uint32_t reconnectDelay = stream->ReconnectDelay;
-
-                // From this point on, `stream` may be invalid if the callback frees it.
-                // DO NOT touch `stream` after this call unless AutoReconnect is true
-                // (auto-reconnect is only meaningful for standalone clients that the
-                // user does NOT free on disconnect).
-                if (stream->OnDisconnect) stream->OnDisconnect(stream);
-
-                if (!autoReconnect || (IStream_getDataPtr(&stream->Input) == NULL || OStream_getDataPtr(&stream->Output) == NULL)) {
-                    // stream may already be freed -> stop immediately, touch nothing else
-                    return 0;
+        
+        // Check for events
+        if (ret > 0 && stream->Connected) {
+            // Read available data
+            if (fds[0].revents & POLLIN) {
+                uint8_t* buf = IStream_getDataPtr(&stream->Input);
+                Stream_LenType space = IStream_directSpace(&stream->Input);
+                
+                if (buf && space > 0) {
+                    int read_bytes = recv(stream->Socket, (char*)buf, (int)space, 0);
+                    
+                    if (read_bytes > 0) {
+                        // KEY: Use IStream_handle to process received data
+                        // This triggers the onReceive callback
+                        stream->Input.Buffer.PendingBytes = read_bytes;
+                        stream->Input.Buffer.InReceive = 1;
+                        IStream_handle(&stream->Input, read_bytes);
+                    } else if (read_bytes == 0) {
+                        // Disconnected
+                        TCPStream_handleDisconnect(stream);
+                        if (!stream->AutoReconnect) return 0;
+                        Sleep(stream->ReconnectDelay);
+                        stream->Running = 1;
+                        TCPStream_init(stream, stream->Host, stream->Port,
+                                     stream->Input.Buffer.Data, stream->Input.Buffer.Size,
+                                     stream->Output.Buffer.Data, stream->Output.Buffer.Size);
+                        return 0;
+                    } else {
+                        int err = WSAGetLastError();
+                        if (err != WSAEWOULDBLOCK) {
+                            TCPStream_errorHandle(stream, err);
+                            TCPStream_handleDisconnect(stream);
+                            if (!stream->AutoReconnect) return 0;
+                            Sleep(stream->ReconnectDelay);
+                            stream->Running = 1;
+                            TCPStream_init(stream, stream->Host, stream->Port,
+                                         stream->Input.Buffer.Data, stream->Input.Buffer.Size,
+                                         stream->Output.Buffer.Data, stream->Output.Buffer.Size);
+                            return 0;
+                        }
+                    }
                 }
-
-                // Reconnect path: only valid if caller guarantees `stream` wasn't freed
-                // in OnDisconnect when AutoReconnect is enabled.
-#if defined(_WIN32) || defined(_WIN64)
-                Sleep(reconnectDelay);
-#else
-                usleep(reconnectDelay * 1000);
-#endif
+            }
+            
+            // Write pending data
+            if (fds[0].revents & POLLOUT) {
+                OStream_handle(&stream->Output, 0);
+                OStream_flush(&stream->Output);
+            }
+            
+            // Handle errors
+            if (fds[0].revents & (POLLERR | POLLHUP | POLLNVAL)) {
+                TCPStream_handleDisconnect(stream);
+                if (!stream->AutoReconnect) return 0;
+                Sleep(stream->ReconnectDelay);
                 stream->Running = 1;
                 TCPStream_init(stream, stream->Host, stream->Port,
-                               IStream_getDataPtr(&stream->Input), stream->Input.Buffer.Size,
-                               OStream_getDataPtr(&stream->Output), stream->Output.Buffer.Size);
-                // TCPStream_init starts a NEW poll thread for the reconnected stream,
-                // so this (old) thread instance is done.
+                             stream->Input.Buffer.Data, stream->Input.Buffer.Size,
+                             stream->Output.Buffer.Data, stream->Output.Buffer.Size);
                 return 0;
-            } else {
-#if defined(_WIN32) || defined(_WIN64)
-                int err = WSAGetLastError();
-                if (err != WSAEWOULDBLOCK) {
-                    uint8_t autoReconnect = stream->AutoReconnect; // snapshot before callback
-                    uint32_t reconnectDelay = stream->ReconnectDelay;
-
-                    TCPStream_errorHandle(stream, err);
-                    
-                    if (!autoReconnect || (IStream_getDataPtr(&stream->Input) == NULL || OStream_getDataPtr(&stream->Output) == NULL)) {
-                        // stream may already be freed -> stop immediately, touch nothing else
-                        return 0;
-                    }
-
-                    // Reconnect path: only valid if caller guarantees `stream` wasn't freed
-                    // in OnDisconnect when AutoReconnect is enabled.
-    #if defined(_WIN32) || defined(_WIN64)
-                    Sleep(reconnectDelay);
-    #else
-                    usleep(reconnectDelay * 1000);
-    #endif
-                    stream->Running = 1;
-                    TCPStream_init(stream, stream->Host, stream->Port,
-                                IStream_getDataPtr(&stream->Input), stream->Input.Buffer.Size,
-                                OStream_getDataPtr(&stream->Output), stream->Output.Buffer.Size);
-                    // TCPStream_init starts a NEW poll thread for the reconnected stream,
-                    // so this (old) thread instance is done.
-                    return 0;
-                }
-#else
-                if (errno != EAGAIN && errno != EWOULDBLOCK) {
-                    uint8_t autoReconnect = stream->AutoReconnect; // snapshot before callback
-                    uint32_t reconnectDelay = stream->ReconnectDelay;
-
-                    TCPStream_errorHandle(stream, errno);
-
-                    if (!autoReconnect || (IStream_getDataPtr(&stream->Input) == NULL || OStream_getDataPtr(&stream->Output) == NULL)) {
-                        // stream may already be freed -> stop immediately, touch nothing else
-                        return 0;
-                    }
-
-                    // Reconnect path: only valid if caller guarantees `stream` wasn't freed
-                    // in OnDisconnect when AutoReconnect is enabled.
-    #if defined(_WIN32) || defined(_WIN64)
-                    Sleep(reconnectDelay);
-    #else
-                    usleep(reconnectDelay * 1000);
-    #endif
-                    stream->Running = 1;
-                    TCPStream_init(stream, stream->Host, stream->Port,
-                                IStream_getDataPtr(&stream->Input), stream->Input.Buffer.Size,
-                                OStream_getDataPtr(&stream->Output), stream->Output.Buffer.Size);
-                    // TCPStream_init starts a NEW poll thread for the reconnected stream,
-                    // so this (old) thread instance is done.
-                    return 0;
-                }
-#endif
-                // --- Write Data (safe: connection still up, no disconnect happened) ---
-                OStream_handle(&stream->Output, 0);
             }
         }
+        
+#else
+        // ===== Linux Path =====
+        struct epoll_event events[2];
+        int timeout = stream->Connected ? -1 : 100;
+        int ret = epoll_wait(stream->EpollFD, events, 2, timeout);
+        
+        if (ret < 0) {
+            if (errno != EINTR) {
+                TCPStream_errorHandle(stream, errno);
+                TCPStream_handleDisconnect(stream);
+                if (!stream->AutoReconnect) return 0;
+                usleep(stream->ReconnectDelay * 1000);
+                stream->Running = 1;
+                TCPStream_init(stream, stream->Host, stream->Port,
+                             stream->Input.Buffer.Data, stream->Input.Buffer.Size,
+                             stream->Output.Buffer.Data, stream->Output.Buffer.Size);
+                return 0;
+            }
+            continue;
+        }
+        
+        // Check connection completion on timeout
+        if (ret == 0 && !stream->Connected) {
+            int error = 0;
+            socklen_t len = sizeof(error);
+            if (getsockopt(stream->Socket, SOL_SOCKET, SO_ERROR, &error, &len) == 0) {
+                if (error == 0) {
+                    // Connected!
+                    stream->Connected = 1;
+                    logInfo("TCPStream connected to %s:%d", stream->Host, stream->Port);
+                    if (stream->OnConnect) stream->OnConnect(stream);
+                } else {
+                    TCPStream_errorHandle(stream, error);
+                    SOCKET_CLOSE(stream->Socket);
+                    stream->Socket = -1;
+                    if (stream->AutoReconnect) {
+                        usleep(stream->ReconnectDelay * 1000);
+                        stream->Running = 1;
+                        TCPStream_init(stream, stream->Host, stream->Port,
+                                     stream->Input.Buffer.Data, stream->Input.Buffer.Size,
+                                     stream->Output.Buffer.Data, stream->Output.Buffer.Size);
+                    }
+                }
+            }
+            continue;
+        }
+        
+        // Process epoll events
+        for (int i = 0; i < ret; i++) {
+            uint32_t ev = events[i].events;
+            
+            // Check connection completion via EPOLLOUT
+            if (!stream->Connected && (ev & (EPOLLOUT | EPOLLERR | EPOLLHUP))) {
+                int error = 0;
+                socklen_t len = sizeof(error);
+                if (getsockopt(stream->Socket, SOL_SOCKET, SO_ERROR, &error, &len) == 0) {
+                    if (error == 0) {
+                        stream->Connected = 1;
+                        logInfo("TCPStream connected to %s:%d", stream->Host, stream->Port);
+                        if (stream->OnConnect) stream->OnConnect(stream);
+                    } else {
+                        TCPStream_errorHandle(stream, error);
+                        SOCKET_CLOSE(stream->Socket);
+                        stream->Socket = -1;
+                        if (stream->AutoReconnect) {
+                            usleep(stream->ReconnectDelay * 1000);
+                            stream->Running = 1;
+                            TCPStream_init(stream, stream->Host, stream->Port,
+                                         stream->Input.Buffer.Data, stream->Input.Buffer.Size,
+                                         stream->Output.Buffer.Data, stream->Output.Buffer.Size);
+                        }
+                        break;
+                    }
+                }
+            }
+            
+            // Read data
+            if (stream->Connected && (ev & EPOLLIN)) {
+                uint8_t* buf = IStream_getDataPtr(&stream->Input);
+                Stream_LenType space = IStream_directSpace(&stream->Input);
+                
+                if (buf && space > 0) {
+                    int read_bytes = read(stream->Socket, buf, space);
+                    
+                    if (read_bytes > 0) {
+                        // KEY: Use IStream_handle to process received data
+                        // This triggers the onReceive callback
+                        stream->Input.Buffer.PendingBytes = read_bytes;
+                        stream->Input.Buffer.InReceive = 1;
+                        IStream_handle(&stream->Input, read_bytes);
+                    } else if (read_bytes == 0) {
+                        // Peer disconnected
+                        TCPStream_handleDisconnect(stream);
+                        if (!stream->AutoReconnect) return 0;
+                        usleep(stream->ReconnectDelay * 1000);
+                        stream->Running = 1;
+                        TCPStream_init(stream, stream->Host, stream->Port,
+                                     stream->Input.Buffer.Data, stream->Input.Buffer.Size,
+                                     stream->Output.Buffer.Data, stream->Output.Buffer.Size);
+                        return 0;
+                    } else {
+                        if (errno != EAGAIN && errno != EWOULDBLOCK) {
+                            TCPStream_errorHandle(stream, errno);
+                            TCPStream_handleDisconnect(stream);
+                            if (!stream->AutoReconnect) return 0;
+                            usleep(stream->ReconnectDelay * 1000);
+                            stream->Running = 1;
+                            TCPStream_init(stream, stream->Host, stream->Port,
+                                         stream->Input.Buffer.Data, stream->Input.Buffer.Size,
+                                         stream->Output.Buffer.Data, stream->Output.Buffer.Size);
+                            return 0;
+                        }
+                    }
+                }
+            }
+            
+            // Write data
+            if (stream->Connected && (ev & EPOLLOUT)) {
+                OStream_handle(&stream->Output, 0);
+                OStream_flush(&stream->Output);
+            }
+            
+            // Handle errors
+            if (ev & (EPOLLERR | EPOLLHUP)) {
+                if (stream->Connected) {
+                    TCPStream_handleDisconnect(stream);
+                    if (!stream->AutoReconnect) return 0;
+                    usleep(stream->ReconnectDelay * 1000);
+                    stream->Running = 1;
+                    TCPStream_init(stream, stream->Host, stream->Port,
+                                 stream->Input.Buffer.Data, stream->Input.Buffer.Size,
+                                 stream->Output.Buffer.Data, stream->Output.Buffer.Size);
+                    return 0;
+                }
+            }
+        }
+#endif
     }
 
     return 0;
@@ -283,10 +422,19 @@ THREAD_RET TCPStream_pollThread(void* arg) {
 static uint8_t TCPStream_internalInit(TCPStream* stream, const char* host, uint16_t port,
                                      uint8_t* rxBuff, Stream_LenType rxSize,
                                      uint8_t* txBuff, Stream_LenType txSize) {
+    if (!stream) return 0;
+    
+    // Don't zero out the whole struct - preserve Args and callbacks
+    stream->Host[0] = '\0';
     strncpy(stream->Host, host, sizeof(stream->Host) - 1);
+    stream->Host[sizeof(stream->Host) - 1] = '\0';
     stream->Port = port;
     stream->Connected = 0;
     stream->Running = 1;
+    stream->Socket = (TCPStream_Socket)(-1);
+#if !(defined(_WIN32) || defined(_WIN64))
+    stream->EpollFD = -1;
+#endif
 
 #if defined(_WIN32) || defined(_WIN64)
     WSADATA wsaData;
@@ -301,6 +449,15 @@ static uint8_t TCPStream_internalInit(TCPStream* stream, const char* host, uint1
     if (sock == INVALID_SOCKET) return 0;
 #else
     if (sock < 0) return 0;
+#endif
+
+    // Set SO_REUSEADDR
+    int opt = 1;
+    setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, 
+#if defined(_WIN32) || defined(_WIN64)
+               (const char*)&opt, sizeof(opt));
+#else
+               &opt, sizeof(opt));
 #endif
 
     TCPStream_setNonBlocking(sock);
@@ -325,51 +482,64 @@ static uint8_t TCPStream_internalInit(TCPStream* stream, const char* host, uint1
         int err = WSAGetLastError();
         if (err != WSAEWOULDBLOCK && err != WSAEINPROGRESS) {
             closesocket(sock);
-            TCPStream_errorHandle(stream, err);
             return 0;
         }
-        // else: connection in progress (normal)
     }
 #else
     if (ret < 0 && errno != EINPROGRESS) {
         close(sock);
-        TCPStream_errorHandle(stream, errno);
         return 0;
     }
 #endif
     stream->Socket = sock;
 
 #if !(defined(_WIN32) || defined(_WIN64))
-    // setup epoll
+    // Setup epoll
     stream->EpollFD = epoll_create1(0);
     if (stream->EpollFD < 0) {
         close(sock);
+        stream->Socket = -1;
         return 0;
     }
+    
     struct epoll_event ev;
+    memset(&ev, 0, sizeof(ev));
     ev.events = EPOLLIN | EPOLLOUT | EPOLLET;
     ev.data.fd = sock;
-    epoll_ctl(stream->EpollFD, EPOLL_CTL_ADD, sock, &ev);
+    if (epoll_ctl(stream->EpollFD, EPOLL_CTL_ADD, sock, &ev) < 0) {
+        close(stream->EpollFD);
+        close(sock);
+        stream->EpollFD = -1;
+        stream->Socket = -1;
+        return 0;
+    }
 #endif
-    // Initialize streams
+
+    // Initialize StreamIn with NO receive function (we handle it manually)
     IStream_init(&stream->Input, NULL, rxBuff, rxSize);
     IStream_setDriverArgs(&stream->Input, stream);
+    
+    // Initialize StreamOut with transmit function
     OStream_init(&stream->Output, TCPStream_transmit, txBuff, txSize);
     OStream_setDriverArgs(&stream->Output, stream);
+    
     __initMutex(stream);
 
     // Start poll thread
 #if defined(_WIN32) || defined(_WIN64)
-    stream->Thread = (HANDLE)_beginthreadex(NULL, 0, TCPStream_pollThread, stream, 0, NULL);
+    stream->Thread = (HANDLE)_beginthreadex(NULL, 0, 
+        (unsigned(__stdcall*)(void*))TCPStream_pollThread, stream, 0, NULL);
     if (!stream->Thread) return 0;
 #else
-    if (pthread_create(&stream->Thread, NULL, TCPStream_pollThread, stream) != 0) return 0;
+    if (pthread_create(&stream->Thread, NULL, TCPStream_pollThread, stream) != 0) {
+        close(stream->EpollFD);
+        close(sock);
+        stream->EpollFD = -1;
+        stream->Socket = -1;
+        return 0;
+    }
     pthread_detach(stream->Thread);
 #endif
-
-    // Do NOT mark connected here; wait for poll thread
-    // stream->Connected = 1;
-    // if(stream->OnConnect) stream->OnConnect(stream);
 
     logInfo("TCPStream initialized (non-blocking) to %s:%d", host, port);
     return 1;
@@ -379,10 +549,34 @@ static uint8_t TCPStream_internalInit(TCPStream* stream, const char* host, uint1
 uint8_t TCPStream_init(TCPStream* stream, const char* address, uint16_t port,
                        uint8_t* rxBuff, Stream_LenType rxSize,
                        uint8_t* txBuff, Stream_LenType txSize) {
+    // Save callbacks and server context before clearing
+    TCPStream_OnConnectFn savedOnConnect = stream->OnConnect;
+    TCPStream_OnDisconnectFn savedOnDisconnect = stream->OnDisconnect;
+    TCPStream_OnErrorFn savedOnError = stream->OnError;
+    void* savedServerContext = stream->ServerContext;
+    TCPStream_ServerOnDisconnectFn savedServerOnDisconnect = stream->ServerOnDisconnect;
+    TCPStream_ServerOnErrorFn savedServerOnError = stream->ServerOnError;
+    void* savedArgs = stream->Args;
+    uint8_t savedAutoReconnect = stream->AutoReconnect;
+    uint32_t savedReconnectDelay = stream->ReconnectDelay;
+    
+    memset(stream, 0, sizeof(TCPStream));
+    
+    // Restore
+    stream->OnConnect = savedOnConnect;
+    stream->OnDisconnect = savedOnDisconnect;
+    stream->OnError = savedOnError;
+    stream->ServerContext = savedServerContext;
+    stream->ServerOnDisconnect = savedServerOnDisconnect;
+    stream->ServerOnError = savedServerOnError;
+    stream->Args = savedArgs;
+    stream->AutoReconnect = savedAutoReconnect;
+    stream->ReconnectDelay = savedReconnectDelay;
+    
     return TCPStream_internalInit(stream, address, port, rxBuff, rxSize, txBuff, txSize);
 }
 
-// Parse URI "host:port"
+// ===== Public Init URI =====
 uint8_t TCPStream_initUri(TCPStream* stream, const char* uri,
                           uint8_t* rxBuff, Stream_LenType rxSize,
                           uint8_t* txBuff, Stream_LenType txSize) {
@@ -395,29 +589,38 @@ uint8_t TCPStream_initUri(TCPStream* stream, const char* uri,
     memcpy(host, uri, len);
     host[len] = '\0';
     port = (uint16_t)atoi(sep+1);
-    return TCPStream_internalInit(stream, host, port, rxBuff, rxSize, txBuff, txSize);
+    return TCPStream_init(stream, host, port, rxBuff, rxSize, txBuff, txSize);
 }
 
 // ===== Close =====
 uint8_t TCPStream_close(TCPStream* stream) {
+    if (!stream) return 0;
+    
     stream->Running = 0;
-#if defined(_WIN32) || defined(_WIN64)
-    if(stream->Socket) closesocket(stream->Socket); // unblock WSAPoll
-    if(stream->Thread) CloseHandle(stream->Thread);
-    WSACleanup();
-#else
-    if(stream->Socket > 0) close(stream->Socket);    // unblock epoll_wait
-    if(stream->EpollFD > 0) close(stream->EpollFD);
-#endif
-    IStream_deinit(&stream->Input);
-    OStream_deinit(&stream->Output);
     stream->Connected = 0;
+    
+#if defined(_WIN32) || defined(_WIN64)
+    if(SOCKET_IS_VALID(stream->Socket)) {
+        closesocket(stream->Socket);
+        stream->Socket = INVALID_SOCKET;
+    }
+#else
+    if(stream->Socket >= 0) {
+        close(stream->Socket);
+        stream->Socket = -1;
+    }
+    if(stream->EpollFD >= 0) {
+        close(stream->EpollFD);
+        stream->EpollFD = -1;
+    }
+#endif
+    
     return 1;
 }
 
 // ===== Is Connected =====
 uint8_t TCPStream_isConnected(TCPStream* stream) {
-    return stream->Connected;
+    return stream ? stream->Connected : 0;
 }
 
 #if STREAM_MUTEX

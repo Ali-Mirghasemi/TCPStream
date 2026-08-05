@@ -42,35 +42,40 @@ typedef struct __TCPStream TCPStream;
 typedef void (*TCPStream_OnConnectFn)(TCPStream* stream);
 typedef void (*TCPStream_OnDisconnectFn)(TCPStream* stream);
 typedef void (*TCPStream_OnErrorFn)(TCPStream* stream, int err);
+typedef void (*TCPStream_ServerOnDisconnectFn)(TCPStream* stream);
+typedef void (*TCPStream_ServerOnErrorFn)(TCPStream* stream, int err);
 
 // ===== TCPStream Structure =====
 struct __TCPStream {
-    void*                   Args;
-    TCPStream_Socket        Socket;
-    StreamIn                Input;
-    StreamOut               Output;
+    void*                           Args;
+    TCPStream_Socket                Socket;
+    StreamIn                        Input;
+    StreamOut                       Output;
 
 #if defined(_WIN32) || defined(_WIN64)
-    HANDLE                  Thread;
-    CRITICAL_SECTION        Mutex;
+    HANDLE                          Thread;
+    CRITICAL_SECTION                Mutex;
 #else
-    pthread_t               Thread;
-    pthread_mutex_t         Mutex;
-    int                     EpollFD;
+    pthread_t                       Thread;
+    pthread_mutex_t                 Mutex;
+    int                             EpollFD;
 #endif
 
-    uint8_t                 Connected;
-    uint8_t                 AutoReconnect;
-    uint32_t                ReconnectDelay;      // in milliseconds
+    uint8_t                         Connected;
+    uint8_t                         AutoReconnect;
+    uint32_t                        ReconnectDelay;      // in milliseconds
 
-    char                    Host[128];
-    uint16_t                Port;
+    char                            Host[128];
+    uint16_t                        Port;
 
-    TCPStream_OnConnectFn    OnConnect;
-    TCPStream_OnDisconnectFn OnDisconnect;
-    TCPStream_OnErrorFn      OnError;
+    TCPStream_OnConnectFn           OnConnect;
+    TCPStream_OnDisconnectFn        OnDisconnect;
+    TCPStream_OnErrorFn             OnError;
+    void*                           ServerContext;
+    TCPStream_ServerOnDisconnectFn  ServerOnDisconnect;
+    TCPStream_ServerOnErrorFn       ServerOnError;
 
-    uint8_t                 Running;
+    uint8_t                         Running;
 };
 
 // ===== Public API =====
@@ -106,6 +111,7 @@ void TCPStream_enableReconnect(TCPStream* stream, uint8_t enable, uint32_t delay
 void TCPStream_onConnect(TCPStream* stream, TCPStream_OnConnectFn cb);
 void TCPStream_onDisconnect(TCPStream* stream, TCPStream_OnDisconnectFn cb);
 void TCPStream_onError(TCPStream* stream, TCPStream_OnErrorFn cb);
+void TCPStream_setServerCallbacks(TCPStream* stream, void* serverContext, TCPStream_ServerOnDisconnectFn onDisconnect, TCPStream_ServerOnErrorFn onError);
 
 #ifdef __cplusplus
 }
