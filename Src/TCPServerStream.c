@@ -36,7 +36,6 @@
 // ===== Internal Helpers =====
 extern THREAD_RET TCPStream_pollThread(void* arg);
 static THREAD_RET TCPServerStream_acceptThread(void* arg);
-static void TCPServerStream_removeClient(TCPServerStream* server, TCPStream* client);
 static int TCPServerStream_setNonBlocking(TCPStream_Socket sock);
 
 extern Stream_Result TCPStream_transmit(StreamOut* stream, uint8_t* buff, Stream_LenType len);
