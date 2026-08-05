@@ -17,9 +17,19 @@
 TCPServerStream server;
 
 // ===== User Callbacks =====
+void onReceive(StreamIn* stream, Stream_LenType len) {
+    TCPStream* client = (TCPStream*)IStream_getDriverArgs(stream);
+    printf("[CLIENT %s:%u] Received %u bytes\n", client->Host, client->Port, len);
+    // Echo Data
+    OStream_writeStream(&client->Output, stream, len);
+    OStream_flush(&client->Output);
+}
+
 void onClientConnect(TCPServerStream* s, TCPStream* client) {
     printf("[SERVER] New client connected from %s:%u (total: %d)\n", 
            client->Host, client->Port, TCPServerStream_getClientCount(s));
+    
+    IStream_onReceive(&client->Input, onReceive);
 }
 
 void onClientDisconnect(TCPServerStream* s, TCPStream* client) {
@@ -29,11 +39,6 @@ void onClientDisconnect(TCPServerStream* s, TCPStream* client) {
 
 void onClientError(TCPServerStream* s, TCPStream* client, int error) {
     printf("[SERVER] Client %s:%u error: %d\n", client->Host, client->Port, error);
-}
-
-void onReceive(StreamIn* stream, Stream_LenType len) {
-    TCPStream* client = (TCPStream*)IStream_getDriverArgs(stream);
-    printf("[CLIENT %s:%u] Received %u bytes\n", client->Host, client->Port, len);
 }
 
 static void sleep_ms(unsigned int ms) {
