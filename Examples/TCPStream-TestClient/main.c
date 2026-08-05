@@ -31,6 +31,7 @@
 #define SERVER_IP "127.0.0.1"
 #define SERVER_PORT 65321
 #define MAX_PACKET_SIZE 1460
+#define PIPELINE_DEPTH 64
 
 typedef enum {
     TEST_DATA_TRANSFER = 1,
@@ -51,101 +52,167 @@ typedef struct {
     volatile int64_t* totalConnections;
 } ClientArgs;
 
-// ===== Data Transfer Test =====
+// ===== State for async data transfer =====
+typedef struct {
+    volatile int64_t bytesRecv;
+    volatile int64_t bytesSent;
+    volatile int done;
+    volatile int error;
+    int64_t totalBytes;
+    int64_t startTime;
+    int64_t lastReport;
+    TCPStream* stream;
+    volatile int64_t* globalSent;
+    volatile int64_t* globalRecv;
+} TransferState;
+
+// Called by poll thread when data arrives
+void onTransferReceive(StreamIn* input, Stream_LenType len) {
+    TCPStream* stream = (TCPStream*)IStream_getDriverArgs(input);
+    TransferState* state = (TransferState*)IStream_getArgs(input);
+    
+    if (!state || state->done) return;
+    
+    uint8_t buf[8192];
+    Stream_LenType available = IStream_available(input);
+    
+    while (available > 0) {
+        Stream_LenType toRead = available;
+        if (toRead > sizeof(buf)) toRead = sizeof(buf);
+        IStream_readBytes(input, buf, toRead);
+        
+        // Verify
+        int64_t base = state->bytesRecv;
+        for (Stream_LenType i = 0; i < toRead; i++) {
+            uint8_t expected = (uint8_t)((base + i) & 0xFF);
+            if (buf[i] != expected) {
+                printf("[TEST] CORRUPTION at byte %lld: exp=0x%02X got=0x%02X\n",
+                       (long long)(base + i), expected, buf[i]);
+                state->error = 1;
+                state->done = 1;
+                return;
+            }
+        }
+        
+        state->bytesRecv += toRead;
+        if (state->globalRecv) __sync_fetch_and_add(state->globalRecv, toRead);
+        
+        // Check if done
+        if (state->bytesRecv >= state->totalBytes) {
+            state->done = 1;
+            return;
+        }
+        
+        available = IStream_available(input);
+    }
+}
+
+// ===== Fast Data Transfer (Pipelined, Callback-driven receive) =====
 static int testDataTransfer(TCPStream* stream, int64_t totalBytes,
                            volatile int64_t* sent, volatile int64_t* recv) {
     uint8_t sendBuf[MAX_PACKET_SIZE];
-    uint8_t recvBuf[MAX_PACKET_SIZE];
     int64_t bytesSent = 0;
-    int64_t bytesRecv = 0;
     int64_t startTime = get_time_ms();
     int64_t lastReport = startTime;
-    uint8_t firstTime = 0;
     
-    printf("[TEST] Transferring %.2f GB...\n", totalBytes / (1024.0*1024.0*1024.0));
+    TransferState state;
+    memset(&state, 0, sizeof(state));
+    state.totalBytes = totalBytes;
+    state.startTime = startTime;
+    state.lastReport = startTime;
+    state.stream = stream;
+    state.globalSent = sent;
+    state.globalRecv = recv;
     
-    while (bytesSent < totalBytes) {
+    // Set up callback for receiving data
+    IStream_setArgs(&stream->Input, &state);
+    IStream_onReceive(&stream->Input, onTransferReceive);
+    
+    printf("[TEST] Transferring %.2f GB (pipelined)...\n", totalBytes / (1024.0*1024.0*1024.0));
+    
+    int64_t sendAhead = 0;
+    
+    while (!state.done && !state.error) {
         if (!stream->Connected) {
-            printf("[TEST] Connection lost at %lld bytes!\n", (long long)bytesSent);
+            printf("[TEST] Connection lost!\n");
             return 0;
         }
         
-        // Calculate packet size
-        uint32_t packetSize = MAX_PACKET_SIZE;
-        if (bytesSent + packetSize > totalBytes) {
-            packetSize = (uint32_t)(totalBytes - bytesSent);
+        // ===== SEND: Keep the pipe full =====
+        while (bytesSent < totalBytes && sendAhead < (PIPELINE_DEPTH * MAX_PACKET_SIZE)) {
+            uint32_t packetSize = MAX_PACKET_SIZE;
+            if (bytesSent + packetSize > totalBytes) {
+                packetSize = (uint32_t)(totalBytes - bytesSent);
+            }
+            
+            if (OStream_space(&stream->Output) < (Stream_LenType)packetSize) {
+                OStream_flush(&stream->Output);
+                if (OStream_space(&stream->Output) < (Stream_LenType)packetSize) break;
+            }
+            
+            for (uint32_t i = 0; i < packetSize; i++) {
+                sendBuf[i] = (uint8_t)((bytesSent + i) & 0xFF);
+            }
+            
+            OStream_writeBytes(&stream->Output, sendBuf, packetSize);
+            bytesSent += packetSize;
+            sendAhead = bytesSent - state.bytesRecv;
+            if (sent) __sync_fetch_and_add(sent, packetSize);
         }
-        if (packetSize > OStream_space(&stream->Output)) {
-            packetSize = OStream_space(&stream->Output);
-        }
-        
-        // Generate test pattern
-        for (uint32_t i = 0; i < packetSize; i++) {
-            sendBuf[i] = (uint8_t)((bytesSent + i) & 0xFF);
-        }
-        
-        // Send
-        OStream_writeBytes(&stream->Output, sendBuf, packetSize);
         OStream_flush(&stream->Output);
         
-        // Wait for echo - poll until we have enough data
-        int64_t waitStart = get_time_ms();
-        Stream_LenType needed = packetSize;
+        // Update sendAhead
+        sendAhead = bytesSent - state.bytesRecv;
         
-        while (IStream_available(&stream->Input) < needed) {
-            if (!stream->Connected) {
-                printf("[TEST] Connection lost while waiting at %lld\n", (long long)bytesSent);
-                return 0;
-            }
-            if (get_time_ms() - waitStart > 10000) {
-                printf("[TEST] Timeout! Sent=%lld, Recv=%lld, Available=%d, Needed=%d\n",
-                       (long long)bytesSent, (long long)bytesRecv,
-                       (int)IStream_available(&stream->Input), (int)needed);
-                return 0;
-            }
+        // Small sleep to avoid busy-waiting
+        if (bytesSent >= totalBytes) {
             sleep_ms(1);
         }
         
-        // Read echo back
-        IStream_readBytes(&stream->Input, recvBuf, packetSize);
-        
-        // Verify
-        for (uint32_t i = 0; i < packetSize; i++) {
-            uint8_t expected = (uint8_t)((bytesSent + i) & 0xFF);
-            if (recvBuf[i] != expected) {
-                printf("[TEST] CORRUPTION at byte %lld: exp=0x%02X got=0x%02X\n",
-                       (long long)(bytesSent + i), expected, recvBuf[i]);
-                return 0;
-            }
-        }
-        
-        bytesSent += packetSize;
-        bytesRecv += packetSize;
-        
-        if (sent) __sync_fetch_and_add(sent, packetSize);
-        if (recv) __sync_fetch_and_add(recv, packetSize);
-        
-        // Progress
+        // Progress report
         int64_t now = get_time_ms();
-        if (!firstTime || packetSize != MAX_PACKET_SIZE || now - lastReport >= 2000) {
-            firstTime = 1;
-            double speed = (bytesSent / (1024.0*1024.0)) / ((now - startTime) / 1000.0);
-            printf("[TEST] %.1f MB (%lu) / %.1f GB (%.1f MB/s)\n",
-                   bytesSent / (1024.0*1024.0), bytesSent,
+        if (now - lastReport >= 2000) {
+            int64_t recvBytes = state.bytesRecv;
+            double elapsed = (now - startTime) / 1000.0;
+            double speed = (recvBytes / (1024.0*1024.0)) / (elapsed > 0 ? elapsed : 0.001);
+            printf("[TEST] %.1f MB / %.1f GB (%.1f MB/s) [pipe: %lld]\n",
+                   recvBytes / (1024.0*1024.0),
                    totalBytes / (1024.0*1024.0*1024.0),
-                   speed);
+                   speed, (long long)sendAhead);
             lastReport = now;
         }
     }
     
+    // Wait a bit more for any straggling data
+    for (int i = 0; i < 50 && !state.done; i++) {
+        sleep_ms(100);
+    }
+    
     double elapsed = (get_time_ms() - startTime) / 1000.0;
-    double speed = (totalBytes / (1024.0*1024.0)) / elapsed;
+    
+    if (state.error) {
+        printf("[TEST] FAILED - data corruption\n");
+        return 0;
+    }
+    
+    if (state.bytesRecv < totalBytes) {
+        printf("[TEST] FAILED - incomplete: recv=%lld / %lld\n",
+               (long long)state.bytesRecv, (long long)totalBytes);
+        return 0;
+    }
+    
+    double speed = (totalBytes / (1024.0*1024.0)) / (elapsed > 0 ? elapsed : 0.001);
     printf("[TEST] Complete: %.2f GB in %.1fs (%.1f MB/s)\n",
            totalBytes / (1024.0*1024.0*1024.0), elapsed, speed);
+    
+    // Clean up callback
+    IStream_onReceive(&stream->Input, NULL);
+    IStream_setArgs(&stream->Input, NULL);
+    
     return 1;
 }
 
-// ===== Rapid Connect Test =====
+// ===== Rapid Connect Test (unchanged) =====
 static int testRapidConnect(int clientId, int iterations,
                            volatile int64_t* connections, volatile int64_t* errors) {
     int ok = 0, fail = 0;
@@ -154,7 +221,7 @@ static int testRapidConnect(int clientId, int iterations,
     printf("[CLIENT %d] %d rapid connects...\n", clientId, iterations);
     
     for (int i = 0; i < iterations; i++) {
-        uint8_t rxBuf[MAX_PACKET_SIZE * 44], txBuf[MAX_PACKET_SIZE * 44];
+        uint8_t rxBuf[4096], txBuf[4096];
         TCPStream stream;
         memset(&stream, 0, sizeof(stream));
         
@@ -166,11 +233,8 @@ static int testRapidConnect(int clientId, int iterations,
             continue;
         }
         
-        // Wait for connect
         int64_t timeout = get_time_ms() + 5000;
-        while (!stream.Connected && get_time_ms() < timeout) {
-            sleep_ms(5);
-        }
+        while (!stream.Connected && get_time_ms() < timeout) sleep_ms(5);
         
         if (stream.Connected) {
             ok++;
@@ -181,9 +245,9 @@ static int testRapidConnect(int clientId, int iterations,
         }
         
         TCPStream_close(&stream);
-        sleep_ms(10); // Small delay between connects
+        sleep_ms(10);
         
-        if ((i+1) % 100 == 0) {
+        if ((i+1) % 500 == 0) {
             printf("[CLIENT %d] %d/%d (ok:%d fail:%d)\n", clientId, i+1, iterations, ok, fail);
         }
     }
@@ -199,7 +263,7 @@ static void* clientThread(void* arg) {
     ClientArgs* a = (ClientArgs*)arg;
     
     if (a->testType == TEST_DATA_TRANSFER || a->testType == TEST_PARALLEL_DATA) {
-        uint8_t rxBuf[MAX_PACKET_SIZE * 44], txBuf[MAX_PACKET_SIZE * 44];
+        uint8_t rxBuf[65536], txBuf[65536];
         TCPStream stream;
         memset(&stream, 0, sizeof(stream));
         
@@ -236,7 +300,7 @@ int main(int argc, char* argv[]) {
     int serverPort = SERVER_PORT;
     int numClients = 4;
     int iterations = 100;
-    double dataSizeGB = 0.1; // Default 100MB for quick testing
+    double dataSizeGB = 0.1;
     
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "-s") == 0 && i+1 < argc) serverIp = argv[++i];
@@ -260,7 +324,6 @@ int main(int argc, char* argv[]) {
     volatile int64_t totalSent = 0, totalRecv = 0, totalErrors = 0, totalConnections = 0;
     int64_t overallStart = get_time_ms();
     
-    // Test 1: Single Data Transfer
     if (testType == 1 || testType == 5) {
         printf("--- Test 1: Data Transfer (%.1f GB) ---\n", dataSizeGB);
         totalSent = totalRecv = totalErrors = totalConnections = 0;
@@ -271,7 +334,6 @@ int main(int argc, char* argv[]) {
                (long long)totalErrors, totalErrors ? "FAIL" : "PASS");
     }
     
-    // Test 2: Rapid Connect
     if (testType == 2 || testType == 5) {
         printf("--- Test 2: Rapid Connect (%d iters) ---\n", iterations);
         totalSent = totalRecv = totalErrors = totalConnections = 0;
@@ -282,7 +344,6 @@ int main(int argc, char* argv[]) {
                totalErrors == 0 ? "PASS" : "FAIL");
     }
     
-    // Test 3: Parallel Data
     if (testType == 3 || testType == 5) {
         printf("--- Test 3: Parallel Data (%d clients x %.1f GB) ---\n", numClients, dataSizeGB);
         totalSent = totalRecv = totalErrors = totalConnections = 0;
@@ -309,7 +370,6 @@ int main(int argc, char* argv[]) {
                totalErrors ? "FAIL" : "PASS");
     }
     
-    // Test 4: Parallel Rapid
     if (testType == 4 || testType == 5) {
         printf("--- Test 4: Parallel Rapid (%d clients x %d iters) ---\n", numClients, iterations);
         totalSent = totalRecv = totalErrors = totalConnections = 0;
