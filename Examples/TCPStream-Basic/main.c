@@ -48,7 +48,7 @@ static void sleep_ms(unsigned int ms)
 
 int main() {
     // Initialize TCPStream
-    if(!TCPStream_initUri(&stream, "192.168.1.10:65321", rxBuff, RX_BUF_SIZE, txBuff, TX_BUF_SIZE)) {
+    if(!TCPStream_initUri(&stream, "192.168.1.250:65321", rxBuff, RX_BUF_SIZE, txBuff, TX_BUF_SIZE)) {
         printf("Failed to initialize TCPStream\n");
         return 1;
     }

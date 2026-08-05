@@ -16,35 +16,27 @@
 
 TCPServerStream server;
 
-// ===== Callback Functions =====
-void onConnect(TCPStream* s) {
-    printf("[INFO] Connected to server!\n");
+// ===== User Callbacks =====
+void onClientConnect(TCPServerStream* s, TCPStream* client) {
+    printf("[SERVER] New client connected from %s:%u (total: %d)\n", 
+           client->Host, client->Port, TCPServerStream_getClientCount(s));
 }
 
-void onDisconnect(TCPStream* s) {
-    printf("[INFO] Disconnected from server!\n");
+void onClientDisconnect(TCPServerStream* s, TCPStream* client) {
+    printf("[SERVER] Client %s:%u disconnected (remaining: %d)\n", 
+           client->Host, client->Port, TCPServerStream_getClientCount(s));
 }
 
-void onError(TCPStream* s, int err) {
-    printf("[ERROR] TCP error: %d\n", err);
+void onClientError(TCPServerStream* s, TCPStream* client, int error) {
+    printf("[SERVER] Client %s:%u error: %d\n", client->Host, client->Port, error);
 }
 
 void onReceive(StreamIn* stream, Stream_LenType len) {
-    printf("[INFO] Data Received: %u!\n", len);
+    TCPStream* client = (TCPStream*)IStream_getDriverArgs(stream);
+    printf("[CLIENT %s:%u] Received %u bytes\n", client->Host, client->Port, len);
 }
 
-void onClientConnect(TCPServerStream* s, TCPStream* client) {
-    printf("[INFO] New client connected! Socket: %d\n", (int)client->Socket);
-
-    // Set client callbacks
-    TCPStream_onConnect(client, onConnect);
-    TCPStream_onDisconnect(client, onDisconnect);
-    TCPStream_onError(client, onError);
-    IStream_onReceive(&client->Input, onReceive);
-}
-
-static void sleep_ms(unsigned int ms)
-{
+static void sleep_ms(unsigned int ms) {
 #if defined(_WIN32) || defined(_WIN64)
     Sleep(ms);
 #else
@@ -57,30 +49,23 @@ static void sleep_ms(unsigned int ms)
 
 int main() {
     // Initialize server
-    if(!TCPServerStream_init(&server, "0.0.0.0", 65321, MAX_CLIENTS, RX_BUF_SIZE, TX_BUF_SIZE, TCPServerStream_Mode_ThreadPerClient)) {
+    if(!TCPServerStream_init(&server, "0.0.0.0", 65321, MAX_CLIENTS, 
+                             RX_BUF_SIZE, TX_BUF_SIZE, 
+                             TCPServerStream_Mode_ThreadPerClient)) {
         printf("Failed to initialize TCPServerStream\n");
         return 1;
     }
 
+    // Register server callbacks
     TCPServerStream_onClientConnect(&server, onClientConnect);
+    TCPServerStream_onClientDisconnect(&server, onClientDisconnect);
+    TCPServerStream_onClientError(&server, onClientError);
 
     uint32_t counter = 0;
-    static uint32_t lastTime = 0;
+    uint32_t lastTime = 0;
 
     while(1) {
-        // --- Echo received data for all clients ---
-        for(uint16_t i = 0; i < server.MaxClients; i++) {
-            TCPStream* client = server.Clients[i];
-            if(!client || !client->Connected) continue;
-
-            Stream_LenType len = IStream_available(&client->Input);
-            if(len > 0) {
-                OStream_writeStream(&client->Output, &client->Input, len);
-                OStream_flush(&client->Output);
-            }
-        }
-
-        // --- Send counter every 5 seconds ---
+        // Broadcast counter every 5 seconds
 #if defined(_WIN32) || defined(_WIN64)
         uint32_t now = GetTickCount();
 #else
@@ -90,13 +75,10 @@ int main() {
 #endif
         if(now - lastTime >= 5000) {
             char buf[64];
-            int n = snprintf(buf, sizeof(buf), "Counter: %u\n", counter++);
-            for(uint16_t i = 0; i < server.MaxClients; i++) {
-                TCPStream* client = server.Clients[i];
-                if(!client || !client->Connected) continue;
-                OStream_writeBytes(&client->Output, (uint8_t*)buf, n);
-                OStream_flush(&client->Output);
-            }
+            int n = snprintf(buf, sizeof(buf), "Server Counter: %u\nClients: %d\n", 
+                           counter++, TCPServerStream_getClientCount(&server));
+            
+            TCPServerStream_broadcast(&server, (uint8_t*)buf, n);
             lastTime = now;
         }
 

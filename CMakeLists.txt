@@ -285,6 +285,8 @@ if(${LIB_NAME_UPPER}_BUILD_EXAMPLES)
     set(EXAMPLE_NAMES
         ${LIB_NAME}-Basic
         ${LIB_NAME}-ServerBasic
+        ${LIB_NAME}-TestServer
+        ${LIB_NAME}-TestClient
     )
 
     foreach(EXAMPLE_NAME ${EXAMPLE_NAMES})
