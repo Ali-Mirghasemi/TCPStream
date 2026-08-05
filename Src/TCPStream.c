@@ -194,7 +194,7 @@ THREAD_RET TCPStream_pollThread(void* arg) {
                 // user does NOT free on disconnect).
                 if (stream->OnDisconnect) stream->OnDisconnect(stream);
 
-                if (!autoReconnect || (stream->Input.Buffer == NULL || stream->Output.Buffer == NULL)) {
+                if (!autoReconnect || (IStream_getDataPtr(&stream->Input) == NULL || OStream_getDataPtr(&stream->Output) == NULL)) {
                     // stream may already be freed -> stop immediately, touch nothing else
                     return 0;
                 }
@@ -222,7 +222,7 @@ THREAD_RET TCPStream_pollThread(void* arg) {
 
                     TCPStream_errorHandle(stream, err);
                     
-                    if (!autoReconnect || (stream->Input.Buffer == NULL || stream->Output.Buffer == NULL)) {
+                    if (!autoReconnect || (IStream_getDataPtr(&stream->Input) == NULL || OStream_getDataPtr(&stream->Output) == NULL))) {
                         // stream may already be freed -> stop immediately, touch nothing else
                         return 0;
                     }
