@@ -169,11 +169,13 @@ static void TCPServerStream_cleanupClient(TCPStream* client) {
     TCPServerStream* server = client->Server;
     
     // Save info for logging
+#if TCPSTREAM_LIB_LOG
     char host[128];
     uint16_t port;
     strncpy(host, client->Host, sizeof(host) - 1);
     host[sizeof(host) - 1] = '\0';
     port = client->Port;
+#endif
     
     // Notify server of disconnection (before removing from list)
     if (server && server->OnClientDisconnect) {
