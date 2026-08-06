@@ -35,6 +35,8 @@ extern "C" {
 #include <stdlib.h>
 
 // Forward declaration
+struct __TCPServerStream;
+typedef struct __TCPServerStream TCPServerStream;
 struct __TCPStream;
 typedef struct __TCPStream TCPStream;
 
@@ -71,7 +73,7 @@ struct __TCPStream {
     TCPStream_OnConnectFn           OnConnect;
     TCPStream_OnDisconnectFn        OnDisconnect;
     TCPStream_OnErrorFn             OnError;
-    void*                           ServerContext;
+    TCPServerStream*                Server;
     TCPStream_ServerOnDisconnectFn  ServerOnDisconnect;
     TCPStream_ServerOnErrorFn       ServerOnError;
 
@@ -111,7 +113,7 @@ void TCPStream_enableReconnect(TCPStream* stream, uint8_t enable, uint32_t delay
 void TCPStream_onConnect(TCPStream* stream, TCPStream_OnConnectFn cb);
 void TCPStream_onDisconnect(TCPStream* stream, TCPStream_OnDisconnectFn cb);
 void TCPStream_onError(TCPStream* stream, TCPStream_OnErrorFn cb);
-void TCPStream_setServerCallbacks(TCPStream* stream, void* serverContext, TCPStream_ServerOnDisconnectFn onDisconnect, TCPStream_ServerOnErrorFn onError);
+void TCPStream_setServerCallbacks(TCPStream* stream, TCPServerStream* serverContext, TCPStream_ServerOnDisconnectFn onDisconnect, TCPStream_ServerOnErrorFn onError);
 
 #ifdef __cplusplus
 }

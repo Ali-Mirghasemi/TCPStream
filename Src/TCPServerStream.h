@@ -34,34 +34,34 @@ typedef struct TCPClientNode {
 
 // ===== TCPServerStream Structure =====
 struct __TCPServerStream {
-    void* Args;
-    TCPStream_Socket ListenSocket;
+    void*                                   Args;
+    TCPStream_Socket                        ListenSocket;
 
 #if defined(_WIN32) || defined(_WIN64)
-    HANDLE Thread;
-    CRITICAL_SECTION Mutex;
+    HANDLE                                  Thread;
+    CRITICAL_SECTION                        Mutex;
 #else
-    pthread_t Thread;
-    pthread_mutex_t Mutex;
+    pthread_t                               Thread;
+    pthread_mutex_t                         Mutex;
 #endif
 
-    uint8_t Running;
-    char Host[128];
-    uint16_t Port;
-    uint16_t MaxClients;
-    Stream_LenType TxBufferSize;
-    Stream_LenType RxBufferSize;
-    TCPServerStream_Mode Mode;
+    uint8_t                                 Running;
+    char                                    Host[128];
+    uint16_t                                Port;
+    uint16_t                                MaxClients;
+    Stream_LenType                          TxBufferSize;
+    Stream_LenType                          RxBufferSize;
+    TCPServerStream_Mode                    Mode;
 
     // Callbacks
-    TCPServerStream_OnClientConnectFn OnClientConnect;
-    TCPServerStream_OnClientDisconnectFn OnClientDisconnect;
-    TCPServerStream_OnClientErrorFn OnClientError;
+    TCPServerStream_OnClientConnectFn       OnClientConnect;
+    TCPServerStream_OnClientDisconnectFn    OnClientDisconnect;
+    TCPServerStream_OnClientErrorFn         OnClientError;
 
     // Client management - using linked list for better performance
-    TCPClientNode* ClientList;
-    uint16_t ClientCount;
-    uint16_t CurrentClients;
+    TCPClientNode*                          ClientList;
+    uint16_t                                ClientCount;
+    uint16_t                                CurrentClients;
 };
 
 // ===== Public API =====

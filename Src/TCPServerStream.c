@@ -166,7 +166,7 @@ static void TCPServerStream_cleanupClient(TCPStream* client) {
     if (!client) return;
     
     // Get server reference before cleanup
-    TCPServerStream* server = (TCPServerStream*)client->Args;
+    TCPServerStream* server = client->Server;
     
     // Save info for logging
     char host[128];
@@ -218,7 +218,7 @@ static void TCPServerStream_cleanupClient(TCPStream* client) {
 // This wrapper handles automatic cleanup
 static THREAD_RET TCPServerStream_clientThread(void* arg) {
     TCPStream* client = (TCPStream*)arg;
-    TCPServerStream* server = (TCPServerStream*)client->Args;
+    TCPServerStream* server = client->Server;
     
     // Set running flag
     client->Running = 1;
@@ -446,7 +446,7 @@ static THREAD_RET TCPServerStream_acceptThread(void* arg) {
         client->Socket = clientSock;
         client->Connected = 1;
         client->Running = 1;
-        client->Args = server; // Store server reference for cleanup
+        client->Server = server; // Store server reference for cleanup
         
         // Store client address
 #if defined(_WIN32) || defined(_WIN64)

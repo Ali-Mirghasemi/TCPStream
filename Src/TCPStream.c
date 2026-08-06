@@ -65,11 +65,11 @@ void TCPStream_onDisconnect(TCPStream* stream, TCPStream_OnDisconnectFn cb) {
 void TCPStream_onError(TCPStream* stream, TCPStream_OnErrorFn cb) { 
     if (stream) stream->OnError = cb; 
 }
-void TCPStream_setServerCallbacks(TCPStream* stream, void* serverContext, 
+void TCPStream_setServerCallbacks(TCPStream* stream, TCPServerStream* server, 
                                    TCPStream_ServerOnDisconnectFn onDisconnect, 
                                    TCPStream_ServerOnErrorFn onError) {
     if (!stream) return;
-    stream->ServerContext = serverContext;
+    stream->Server = server;
     stream->ServerOnDisconnect = onDisconnect;
     stream->ServerOnError = onError;
 }
@@ -527,7 +527,7 @@ uint8_t TCPStream_init(TCPStream* stream, const char* address, uint16_t port,
     TCPStream_OnConnectFn savedOnConnect = stream->OnConnect;
     TCPStream_OnDisconnectFn savedOnDisconnect = stream->OnDisconnect;
     TCPStream_OnErrorFn savedOnError = stream->OnError;
-    void* savedServerContext = stream->ServerContext;
+    TCPServerStream* savedServer = stream->Server;
     TCPStream_ServerOnDisconnectFn savedServerOnDisconnect = stream->ServerOnDisconnect;
     TCPStream_ServerOnErrorFn savedServerOnError = stream->ServerOnError;
     void* savedArgs = stream->Args;
@@ -540,7 +540,7 @@ uint8_t TCPStream_init(TCPStream* stream, const char* address, uint16_t port,
     stream->OnConnect = savedOnConnect;
     stream->OnDisconnect = savedOnDisconnect;
     stream->OnError = savedOnError;
-    stream->ServerContext = savedServerContext;
+    stream->Server = savedServer;
     stream->ServerOnDisconnect = savedServerOnDisconnect;
     stream->ServerOnError = savedServerOnError;
     stream->Args = savedArgs;
