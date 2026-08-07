@@ -34,11 +34,10 @@
     #include <errno.h>
     #include <sys/types.h>
     #include <sys/socket.h>
-    #include <sys/select.h>      // <-- Added for fd_set, select()
-    #include <sys/time.h>        // <-- Added for struct timeval
     #include <netinet/in.h>
     #include <arpa/inet.h>
     #include <sys/epoll.h>
+    #include <poll.h>
     typedef int ServerSocket;
     #define CLOSESOCKET(s) close(s)
     #define SOCKET_IS_VALID(s) ((s) >= 0)
@@ -359,7 +358,7 @@ uint8_t TCPServerStream_init(
     return 1;
 }
 
-// ===== Accept Thread =====
+// ===== Fixed Accept Thread (use poll instead of select) =====
 static THREAD_RET TCPServerStream_acceptThread(void* arg) {
     TCPServerStream* server = (TCPServerStream*)arg;
     
@@ -367,53 +366,47 @@ static THREAD_RET TCPServerStream_acceptThread(void* arg) {
         struct sockaddr_in clientAddr;
         socklen_t addrLen = sizeof(clientAddr);
         
-        // Accept with timeout to allow checking Running flag
-        fd_set readfds;
-        FD_ZERO(&readfds);
-        
+        // Use poll instead of select - no FD_SETSIZE limit!
 #if defined(_WIN32) || defined(_WIN64)
-        FD_SET(server->ListenSocket, &readfds);
+        WSAPOLLFD pfd;
+        pfd.fd = server->ListenSocket;
+        pfd.events = POLLIN;
+        pfd.revents = 0;
+        int ret = WSAPoll(&pfd, 1, 500); // 500ms timeout
 #else
-        if (server->ListenSocket < FD_SETSIZE) {
-            FD_SET(server->ListenSocket, &readfds);
-        } else {
-            logError("Socket fd too large for select()");
-            SLEEP_MS(500);
-            continue;
-        }
+        struct pollfd pfd;
+        pfd.fd = server->ListenSocket;
+        pfd.events = POLLIN;
+        pfd.revents = 0;
+        int ret = poll(&pfd, 1, 500); // 500ms timeout
 #endif
         
-        struct timeval tv;
-        tv.tv_sec = 0;
-        tv.tv_usec = 500000; // 500ms timeout
-        
-        int selectResult = select(
-#if defined(_WIN32) || defined(_WIN64)
-            0,
-#else
-            server->ListenSocket + 1,
-#endif
-            &readfds, NULL, NULL, &tv);
-        
-        if (selectResult < 0) {
+        if (ret < 0) {
             if (!server->Running) break;
 #if defined(_WIN32) || defined(_WIN64)
             int err = WSAGetLastError();
             if (err != WSAEINTR) {
-                logError("select failed: %d", err);
+                logError("poll failed: %d", err);
             }
 #else
             if (errno != EINTR) {
-                logError("select failed: %d", errno);
+                logError("poll failed: %d", errno);
             }
 #endif
             continue;
         }
         
-        if (selectResult == 0 || !FD_ISSET(server->ListenSocket, &readfds)) {
-            // Timeout - check if we should continue
+        if (ret == 0) {
+            // Timeout - just continue loop
             continue;
         }
+        
+        // Check if our socket is ready
+#if defined(_WIN32) || defined(_WIN64)
+        if (!(pfd.revents & POLLIN)) continue;
+#else
+        if (!(pfd.revents & POLLIN)) continue;
+#endif
         
         TCPStream_Socket clientSock = accept(server->ListenSocket, (struct sockaddr*)&clientAddr, &addrLen);
         
