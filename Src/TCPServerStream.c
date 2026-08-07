@@ -57,6 +57,7 @@
     #define MUTEX_LOCK(m) pthread_mutex_lock(m)
     #define MUTEX_UNLOCK(m) pthread_mutex_unlock(m)
 #endif
+    #include <netinet/tcp.h>
 
 // ===== Define POSIX source for usleep =====
 #if !defined(_WIN32) && !defined(_WIN64)
@@ -409,6 +410,14 @@ static THREAD_RET TCPServerStream_acceptThread(void* arg) {
 #endif
         
         TCPStream_Socket clientSock = accept(server->ListenSocket, (struct sockaddr*)&clientAddr, &addrLen);
+        int keepalive = 1;
+        int keepidle = 30;   // Start probing after 30 seconds idle
+        int keepintvl = 5;   // Probe every 5 seconds
+        int keepcnt = 3;     // 3 probes before declaring dead
+        setsockopt(clientSock, SOL_SOCKET, SO_KEEPALIVE, &keepalive, sizeof(keepalive));
+        setsockopt(clientSock, IPPROTO_TCP, TCP_KEEPIDLE, &keepidle, sizeof(keepidle));
+        setsockopt(clientSock, IPPROTO_TCP, TCP_KEEPINTVL, &keepintvl, sizeof(keepintvl));
+        setsockopt(clientSock, IPPROTO_TCP, TCP_KEEPCNT, &keepcnt, sizeof(keepcnt));
         
         if (!server->Running) {
             if (SOCKET_IS_VALID(clientSock)) CLOSESOCKET(clientSock);
@@ -561,6 +570,14 @@ uint8_t TCPServerStream_close(TCPServerStream* server) {
             
             // Signal client to stop
             client->Running = 0;
+            
+            // Close epoll FD to unblock epoll_wait
+        #if !(defined(_WIN32) || defined(_WIN64))
+            if (client->EpollFD >= 0) {
+                close(client->EpollFD);
+                client->EpollFD = -1;
+            }
+        #endif
             
             // Close client socket to unblock poll thread
             if (SOCKET_IS_VALID(client->Socket)) {
