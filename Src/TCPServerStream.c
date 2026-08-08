@@ -409,16 +409,7 @@ static THREAD_RET TCPServerStream_acceptThread(void* arg) {
         if (!(pfd.revents & POLLIN)) continue;
 #endif
         
-        TCPStream_Socket clientSock = accept(server->ListenSocket, (struct sockaddr*)&clientAddr, &addrLen);
-        int keepalive = 1;
-        int keepidle = 30;   // Start probing after 30 seconds idle
-        int keepintvl = 5;   // Probe every 5 seconds
-        int keepcnt = 3;     // 3 probes before declaring dead
-        setsockopt(clientSock, SOL_SOCKET, SO_KEEPALIVE, &keepalive, sizeof(keepalive));
-        setsockopt(clientSock, IPPROTO_TCP, TCP_KEEPIDLE, &keepidle, sizeof(keepidle));
-        setsockopt(clientSock, IPPROTO_TCP, TCP_KEEPINTVL, &keepintvl, sizeof(keepintvl));
-        setsockopt(clientSock, IPPROTO_TCP, TCP_KEEPCNT, &keepcnt, sizeof(keepcnt));
-        
+        TCPStream_Socket clientSock = accept(server->ListenSocket, (struct sockaddr*)&clientAddr, &addrLen);        
         if (!server->Running) {
             if (SOCKET_IS_VALID(clientSock)) CLOSESOCKET(clientSock);
             break;
@@ -431,6 +422,20 @@ static THREAD_RET TCPServerStream_acceptThread(void* arg) {
             }
             continue;
         }
+
+        // Set socket options
+        int keepalive = 1;
+        int keepidle = 30;   // Start probing after 30 seconds idle
+        int keepintvl = 5;   // Probe every 5 seconds
+        int keepcnt = 3;     // 3 probes before declaring dead
+        int nodelay = 1;
+        int quickack = 1;
+        setsockopt(clientSock, SOL_SOCKET, SO_KEEPALIVE, &keepalive, sizeof(keepalive));
+        setsockopt(clientSock, IPPROTO_TCP, TCP_KEEPIDLE, &keepidle, sizeof(keepidle));
+        setsockopt(clientSock, IPPROTO_TCP, TCP_KEEPINTVL, &keepintvl, sizeof(keepintvl));
+        setsockopt(clientSock, IPPROTO_TCP, TCP_KEEPCNT, &keepcnt, sizeof(keepcnt));
+        setsockopt(clientSock, IPPROTO_TCP, TCP_NODELAY, &nodelay, sizeof(nodelay));
+        setsockopt(clientSock, IPPROTO_TCP, TCP_QUICKACK, &quickack, sizeof(quickack));
         
         // Check client limit
         if (server->CurrentClients >= server->MaxClients) {
@@ -497,7 +502,7 @@ static THREAD_RET TCPServerStream_acceptThread(void* arg) {
         
         struct epoll_event ev;
         memset(&ev, 0, sizeof(ev));
-        ev.events = EPOLLIN | EPOLLOUT | EPOLLET;
+        ev.events = EPOLLIN | EPOLLET;
         ev.data.ptr = client;
         if (epoll_ctl(client->EpollFD, EPOLL_CTL_ADD, clientSock, &ev) < 0) {
             logError("epoll_ctl failed: %d", errno);

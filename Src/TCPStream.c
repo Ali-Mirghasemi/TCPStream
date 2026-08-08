@@ -397,7 +397,7 @@ THREAD_RET TCPStream_pollThread(void* arg) {
             uint32_t ev = events[i].events;
             
             // Connection completion
-            if (!stream->Connected && (ev & (EPOLLOUT | EPOLLERR | EPOLLHUP))) {
+            if (!stream->Connected && (ev & (EPOLLERR | EPOLLHUP))) {
                 int error = 0;
                 socklen_t len = sizeof(error);
                 if (getsockopt(stream->Socket, SOL_SOCKET, SO_ERROR, &error, &len) == 0) {
